@@ -28,6 +28,7 @@ import type {} from '@deepseek-ai/dsh-permission-presets'
 // them through the tool registry's global layer.
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { delegationDepthOf } from './depth.ts'
+import { SubagentError } from './error.ts'
 
 /** Thrown when starting a child would exceed the requested depth cap. */
 export class SubagentDepthError extends Error {
@@ -35,6 +36,23 @@ export class SubagentDepthError extends Error {
     super(`subagent depth ${attemptedDepth} exceeds maxDepth ${maxDepth}`)
     this.name = 'SubagentDepthError'
   }
+}
+
+/**
+ * Fail one start whose explicitly requested preset cannot be composed. The
+ * start fails rather than falling back to the parent's composition: a silent
+ * fallback is a child that looks preset-pinned and is not.
+ * @param agentPreset - the requested preset id.
+ * @param reason - why it could not be composed (the roster's own error, or the reason no roster exists).
+ * @returns the typed failure for the caller to throw.
+ */
+function unresolvedPreset(agentPreset: string, reason: unknown): SubagentError {
+  const detail = reason instanceof Error ? reason.message : String(reason)
+  return new SubagentError(
+    `subagent: request.agentPreset "${agentPreset}" could not be composed: ${detail}`,
+    'AGENT_PRESET_UNRESOLVED',
+    { cause: reason },
+  )
 }
 
 /**
@@ -130,19 +148,23 @@ export function resolveChildAgentOptions(
  * composition and its header still names the older one. Recording it is what
  * makes a child's history reconstructable: without it a cold read of the child
  * resolves the deployment default and rebuilds turns under a tool set the
- * child never had.
+ * child never had. An explicitly requested preset replaces that inheritance in
+ * the record too — the child ran on the requested composition, so that is what
+ * its history must read back under.
  * @param parent - the delegating parent agent.
  * @param childDepth - the resolved delegation depth to persist.
  * @param isSeeded - whether this child inherits a parent-log prefix, including an explicitly empty one.
+ * @param agentPresetOverride - the preset the start explicitly requested, which replaces the parent's composition.
  * @returns the `meta` for `ctx.agents.create()`.
  */
 export function childSessionMeta(
   parent: Agent,
   childDepth: number,
   isSeeded: boolean,
+  agentPresetOverride?: string,
 ): NonNullable<CreateAgentOptions['meta']> {
   const parentHeader = parent.session.header
-  const agentPreset = parent.ctx.get('agentPresets')?.composedPreset(parent.ctx)
+  const agentPreset = agentPresetOverride ?? parent.ctx.get('agentPresets')?.composedPreset(parent.ctx)
   return {
     ...parentHeader.cwd !== undefined ? { cwd: parentHeader.cwd } : {},
     ...agentPreset === undefined ? {} : { agentPreset },
@@ -162,6 +184,8 @@ export interface ChildComposition {
   readonly persona?: string | undefined
   /** Per-child tool scoping. */
   readonly toolFilter?: ToolRestriction | undefined
+  /** Explicit preset to mount the child on, replacing the join to its parent's composition. */
+  readonly agentPreset?: string | undefined
 }
 
 /**
@@ -176,16 +200,25 @@ export const SUBAGENT_DELEGATION_CONTEXT
     + 'limitation in your reply so the delegating agent can handle it.'
 
 /**
- * Compose one child inside its creation window: join its parent's preset,
- * register the fixed delegation-scope statement, then apply the child's own
- * shadowing persona section and tool restriction, all owned by the child's
- * scope and therefore invisible to its parent and siblings. Creation and cold
- * resume both pass through here.
+ * Compose one child inside its creation window: join it to a preset, register
+ * the fixed delegation-scope statement, then apply the child's own shadowing
+ * persona section and tool restriction, all owned by the child's scope and
+ * therefore invisible to its parent and siblings. Creation and cold resume both
+ * pass through here.
  *
- * The join comes first and the child's own registrations second, which is the
- * order the layering already implies — the nearest scope wins a name, and a
- * per-child restriction intersects with everything its chain admits — but
- * stating it here keeps the two steps from being read as independent.
+ * The join is the parent's composition unless `composition.agentPreset` names
+ * one, in which case the child is MOUNTED on that preset instead — a fixed
+ * capability surface rather than whatever its parent happens to run. Mounting
+ * reads the roster and the composition file, so it is asynchronous: the caller
+ * must await the returned promise inside the creation window, where a rejection
+ * rolls the creation back and an unresolvable preset fails the start loudly
+ * instead of silently falling back to inheritance.
+ *
+ * The join is initiated first and the child's own registrations follow
+ * synchronously, which is the order the layering already implies — the nearest
+ * scope wins a name, and a per-child restriction intersects with everything its
+ * chain admits — but stating it here keeps the two steps from being read as
+ * independent.
  *
  * The join and the per-child registrations live in ONE call because a child
  * composed without the join is exactly the defect this function exists to
@@ -194,15 +227,33 @@ export const SUBAGENT_DELEGATION_CONTEXT
  * sections. Taking the parent as a parameter is what makes that omission
  * unrepresentable at the call sites.
  * @param childCtx - the child agent's scoped creation context.
- * @param parent - the delegating parent whose composition the child joins.
- * @param composition - the per-child persona and tool filter to install.
+ * @param parent - the delegating parent whose composition the child joins when no preset is named.
+ * @param composition - the per-child preset, persona, and tool filter to install.
+ * @returns the mount to await, or undefined when the child joins its parent synchronously.
+ * @throws {SubagentError} `AGENT_PRESET_UNRESOLVED` when an explicit preset is requested and cannot be composed.
  */
 export function applyChildComposition(
   childCtx: Context,
   parent: Agent,
   composition: ChildComposition,
-): void {
-  childCtx.get('agentPresets')?.composeFrom(childCtx, parent.ctx)
+): void | Promise<void> {
+  const requested = composition.agentPreset
+  const presets = childCtx.get('agentPresets')
+  let mounting: Promise<void> | undefined
+  if (presets === undefined) {
+    // A rosterless deployment keeps its model-facing rows on the host plane, so
+    // its children need no join — but it cannot honor a named preset either.
+    if (requested !== undefined) {
+      throw unresolvedPreset(requested, 'this deployment composes no agent-preset roster')
+    }
+  } else if (requested === undefined) {
+    presets.composeFrom(childCtx, parent.ctx)
+  } else {
+    mounting = presets.mount(childCtx, requested).then(
+      () => undefined,
+      (error: unknown) => { throw unresolvedPreset(requested, error) },
+    )
+  }
   childCtx.systemPrompt.context({
     name: 'subagent:delegation',
     order: childCtx.systemPrompt.getContextOrder('SUBAGENT_DELEGATION'),
@@ -216,6 +267,7 @@ export function applyChildComposition(
     })
   }
   if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.toolFilter)
+  return mounting
 }
 
 /** Policy seeded onto a child session's log at the delegation boundary. */

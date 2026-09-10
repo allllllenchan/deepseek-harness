@@ -198,6 +198,17 @@ export interface SubagentStartRequest {
    * persona (strict `{{…}}` interpolation against the registered variables).
    */
   readonly persona?: string
+  /**
+   * Optional explicit agent preset for the child session. Absent — the default
+   * — the child inherits its parent's composed preset, which is unchanged
+   * behaviour. Named, the child is mounted on that preset instead of joining
+   * the parent's composition, so a delegating agent can pin its children to a
+   * fixed capability surface. Honored by the in-process providers; a provider
+   * that composes its child out of process ignores it. A preset that cannot be
+   * resolved FAILS the start, naming the preset and this field, rather than
+   * silently falling back to inheritance.
+   */
+  readonly agentPreset?: string
 }
 
 /**
