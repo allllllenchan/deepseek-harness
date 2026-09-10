@@ -70,6 +70,8 @@ With `openAt: first-search`, the service activates without importing `node:sqlit
 
 Typed `SessionQueryError` failures carry stable codes: `SESSION_QUERY_SEARCH_DISABLED` when search is configured off; `SESSION_QUERY_INDEX_FAILED` when the index cannot open or reconcile; `SESSION_QUERY_SESSION_NOT_FOUND` when a search target is absent; `SESSION_QUERY_STALE_CURSOR` when the corpus changed between pages — retry the complete search call; and `SESSION_QUERY_INVALID_CURSOR` for a cursor that does not belong to this request. Cancellation is honored between synchronous SQLite calls; a statement already executing on the JavaScript thread cannot be interrupted.
 
+A persisted log that fails to read or validate is skipped for one reconciliation attempt: it stays out of full-text results, `listSessions` still lists it from persistence headers, and a repaired log (new revision) is indexed on a later attempt. With `openAt: startup`, one full reconcile commits at activation so searches never wait behind a cold index; a startup reconcile failure is logged, not fatal, and the next search reconciles as usual.
+
 -----
 
 <a id="understand-the-implementation"></a>

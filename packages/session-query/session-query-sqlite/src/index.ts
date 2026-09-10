@@ -260,9 +260,26 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     ctx.effect(() => async () => this.close(), 'sessionQuerySqlite.close')
   }
 
-  /** Open eagerly only when activation owns the configured readiness boundary. */
+  /**
+   * Open eagerly only when activation owns the configured readiness boundary,
+   * committing one full reconcile so searches never starve behind a cold
+   * index. A startup reconcile failure is logged, not fatal: each search
+   * re-runs reconcile.
+   */
   protected async [Service.init](): Promise<void> {
-    if (this.config.openAt === 'startup') await this._ensureReady(undefined)
+    if (this.config.openAt === 'startup') {
+      await this._ensureReady(undefined)
+      // Opening the handle is not enough to serve searches: each search
+      // reconciles inside its own deadline, so a large cold corpus starves
+      // every early search. Commit one full reconcile at boot.
+      try {
+        await this._reconcile(undefined)
+        console.log('[session-query-sqlite] startup reconcile committed')
+      } catch (error: unknown) {
+        console.warn('[session-query-sqlite] startup reconcile failed; the next search retries:'
+          + ` ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
   }
 
   override async searchSessions(
@@ -519,10 +536,20 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
             // live-preferred.
             if (initiallyLive.has(entry.header.id) || this.ctx.sessions.get(entry.header.id) !== undefined) continue
             assertNotAborted(signal)
-            const loaded = await readColdSessionLog(persistence, entry.header.id, signal)
-            assertNotAborted(signal)
-            assertSessionHeadersCompatible(entry.header, loaded.header)
-            entry.loaded = observeSession(loaded.header, loaded.inheritedEventCount, loaded.events)
+            // A read or header failure for one session must not abort the
+            // whole observation: the log is skipped for this attempt (the
+            // session stays unindexed, repairs are picked up on a later
+            // attempt), while aborts keep propagating.
+            try {
+              const loaded = await readColdSessionLog(persistence, entry.header.id, signal)
+              assertNotAborted(signal)
+              assertSessionHeadersCompatible(entry.header, loaded.header)
+              entry.loaded = observeSession(loaded.header, loaded.inheritedEventCount, loaded.events)
+            } catch (error: unknown) {
+              if (isAbort(error) || signal?.aborted) throw error
+              console.warn(`[session-query-sqlite] skipping unindexable session log ${entry.header.id}:`
+                + ` ${error instanceof Error ? error.message : String(error)}`)
+            }
           }
           assertNotAborted(signal)
           const afterSnapshots = await persistence.list(listOptions)

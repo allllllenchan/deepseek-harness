@@ -91,6 +91,10 @@ class TestHandle implements SessionHandle {
     TestPersistence.reads.set(this.id, (TestPersistence.reads.get(this.id) ?? 0) + 1)
     TestPersistence.readSignals.push(options?.signal)
     if (TestPersistence.failure !== undefined) throw TestPersistence.failure
+    const targetedFailure = TestPersistence.readFailures.get(this.id)
+    // Sticky: every read of the poisoned id rejects until the test clears the
+    // entry (or reset() wipes it), modeling persistent log corruption.
+    if (targetedFailure !== undefined) throw targetedFailure
     const entry = TestPersistence.entries.get(this.id)
     if (entry === undefined) throw new SessionPersistenceNotFoundError(this.id)
     await TestPersistence.readEffect?.(entry, options?.signal)
@@ -137,6 +141,8 @@ class TestPersistence extends SessionPersistence {
   static listEffect: ((signal?: AbortSignal) => void | Promise<void>) | undefined
   static listOverride: (() => SessionPersistenceSnapshot[]) | undefined
   static failure: unknown
+  /** One-shot read failure keyed by session id; cleared after the targeted read rejects. */
+  static readFailures = new Map<SessionIdType, unknown>()
 
   static reset(entries: readonly { meta: SessionHeader; events: SessionEvent[] }[] = []): void {
     this.entries = new Map()
@@ -151,6 +157,7 @@ class TestPersistence extends SessionPersistence {
     this.listEffect = undefined
     this.listOverride = undefined
     this.failure = undefined
+    this.readFailures = new Map()
   }
 
   static set(entry: { meta: SessionHeader; events: SessionEvent[] }): void {
@@ -824,6 +831,71 @@ describe('SQLite reconciliation and source lifecycle', () => {
     await expect(ctx.sessionQuery.searchSessions({ query: 'durable' })).resolves.toEqual({ items: [] })
     await expect(ctx.sessionQuery.searchEvents({ sessionId: durable.id, query: 'needle' }))
       .rejects.toThrow(expectCode('SESSION_QUERY_SESSION_NOT_FOUND'))
+  })
+
+  it('skips a corrupt cold log and still indexes the rest of the persisted corpus', async () => {
+    const corrupt = header('corrupt', 1)
+    const healthy = header('healthy', 2)
+    TestPersistence.reset([
+      { meta: corrupt, events: messageEvents('corrupt needle') },
+      { meta: healthy, events: messageEvents('healthy needle') },
+    ])
+    TestPersistence.readFailures.set(corrupt.id, new Error('seq gap in committed region'))
+    const ctx = await liveContext({ path: ':memory:' })
+    const persistence = await ctx.plugin(TestPersistence)
+
+    await expect(ctx.sessionQuery.searchSessions({ query: 'healthy' }))
+      .resolves.toMatchObject({ items: [{ header: healthy, live: false, persisted: true }] })
+    await expect(ctx.sessionQuery.searchSessions({ query: 'corrupt' })).resolves.toEqual({ items: [] })
+    // The corrupt log stays discoverable at the header level: listSessions
+    // reads persistence directly, not the index.
+    await expect(ctx.sessionQuery.listSessions()).resolves.toEqual([
+      expect.objectContaining({ header: healthy, live: false, persisted: true }),
+      expect.objectContaining({ header: corrupt, live: false, persisted: true }),
+    ])
+
+    // Repairing the log (clearing the sticky fault) makes the next reconcile
+    // index it: skipping is per-attempt, not a poisoned permanent exclusion.
+    TestPersistence.readFailures.delete(corrupt.id)
+    TestPersistence.revisions.set(corrupt.id, ++TestPersistence.nextRevision)
+    await expect(ctx.sessionQuery.searchSessions({ query: 'corrupt' }))
+      .resolves.toMatchObject({ items: [{ header: corrupt, live: false, persisted: true }] })
+    await persistence.dispose()
+  })
+
+  it('retries a failed startup reconcile on the first search instead of starving', async () => {
+    const durable = header('delayed', 1)
+    const path = await temporaryPath('startup-retry.db')
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    TestPersistence.reset([{ meta: durable, events: messageEvents('startup needle') }])
+    // Persistence arrives after the engine mounts: the openAt 'startup'
+    // reconcile runs without a persistence binding and commits nothing.
+    const engine = await ctx.plugin(SqliteSessionQueryEngine, { path, openAt: 'startup' })
+    await ctx.plugin(TestPersistence)
+
+    await expect(ctx.sessionQuery.searchSessions({ query: 'startup' }))
+      .resolves.toMatchObject({ items: [{ header: durable, live: false, persisted: true }] })
+    await engine.dispose()
+  })
+
+  it('commits a startup reconcile before the first search when persistence is already mounted', async () => {
+    const durable = header('warm', 1)
+    const path = await temporaryPath('startup-warm.db')
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    TestPersistence.reset([{ meta: durable, events: messageEvents('warm needle') }])
+    await ctx.plugin(TestPersistence)
+    const engine = await ctx.plugin(SqliteSessionQueryEngine, { path, openAt: 'startup' })
+
+    // The startup reconcile already indexed the corpus: the search reuses the
+    // committed rows — the log is read exactly once, at startup.
+    await expect(ctx.sessionQuery.searchSessions({ query: 'warm' }))
+      .resolves.toMatchObject({ items: [{ header: durable, live: false, persisted: true }] })
+    expect(TestPersistence.reads.get(durable.id)).toBe(1)
+    await engine.dispose()
   })
 
   it('does not load a persisted log while the same session is live', async () => {

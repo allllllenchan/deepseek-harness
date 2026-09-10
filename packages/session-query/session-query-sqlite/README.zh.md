@@ -70,6 +70,8 @@ kind: "package-reference"
 
 带类型的 `SessionQueryError` 失败携带稳定代码：搜索配置为关闭时 `SESSION_QUERY_SEARCH_DISABLED`；索引无法打开或对账时 `SESSION_QUERY_INDEX_FAILED`；搜索目标不存在时 `SESSION_QUERY_SESSION_NOT_FOUND`；语料库在分页之间变化时 `SESSION_QUERY_STALE_CURSOR`——请重试完整的搜索调用；游标不属于该请求时 `SESSION_QUERY_INVALID_CURSOR`。取消在同步 SQLite 调用之间被尊重；已在 JavaScript 线程上执行的语句无法被中断。
 
+读取或校验失败的持久化日志在单次对账尝试中被跳过：它不出现在全文搜索结果里，`listSessions` 仍从持久化 header 列出它，修复后的日志（新 revision）在之后的尝试中入索引。配置为 `openAt: startup` 时，激活阶段提交一次完整对账，搜索从此不必等待冷索引；启动对账失败只记日志、不致命，下一次搜索照常对账。
+
 -----
 
 <a id="understand-the-implementation"></a>
