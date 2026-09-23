@@ -1995,7 +1995,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `job_output`
 
-读取后台任务。流式任务只返回自上次读取以来的输出；最终输出任务会在结算后返回结果。每个响应都以 `[status: ...]` 结尾。读取默认不阻塞；设置 `wait: true` 后，最长等待到配置的上限。
+读取后台任务。流式任务只返回自上次读取以来的输出；最终输出任务会在结算后返回结果。每个响应都以 `[status: ...]` 结尾。读取默认不阻塞；设置 `wait: true` 后，最长等待到配置的上限，并在 `pattern` 出现在输出中时提前返回。`tail_lines` 和 `max_bytes` 限定返回内容。
 
 ```json
 {
@@ -2007,11 +2007,23 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
     },
     "wait": {
       "type": "boolean",
-      "description": "Block until the job reaches a terminal status or the timeout expires. A timed-out wait returns [status: running] and leaves the job alive."
+      "description": "Block until the job reaches a terminal status, the timeout expires, or a supplied `pattern` appears. A timed-out wait returns [status: running] and leaves the job alive."
     },
     "timeout_ms": {
       "type": "number",
       "description": "Max wait in milliseconds (only meaningful with wait: true). Defaults to the configured wait timeout; capped by the configured maximum."
+    },
+    "pattern": {
+      "type": "string",
+      "description": "Literal text to wait for (only meaningful with wait: true). The wait ends at the first read whose output contains it — before the job itself ends — and returns the output read so far, including that text."
+    },
+    "tail_lines": {
+      "type": "number",
+      "description": "Return only the last N lines of the output. Earlier lines were already read and are not returned by a later call."
+    },
+    "max_bytes": {
+      "type": "number",
+      "description": "Cap on the complete returned result in UTF-8 bytes, including the [status: ...] line. The tighter of this and the job's own output cap applies."
     }
   },
   "required": [

@@ -47,6 +47,7 @@ The config fields govern the background surface.
 |---|---|---|
 | `enableRunInBackground` | `true` | Expose `run_in_background` while a job registry is composed; when `false`, forced background calls are rejected |
 | `promoteOnTimeout` | `true` | Keep a foreground command that reaches its timeout running as its background job instead of killing it |
+| `maxResultBytes` | `262144` | Byte cap for one complete result of a background job: a `job_output` read, its terminal kill status, or its completion notice |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-pwsh) is the exhaustive source for every accepted field and its JSDoc; the generated [tool catalog](../../../docs/tool-catalog.md#deepseek-aidsh-tool-pwsh) carries the full argument schema.
 

@@ -33,6 +33,12 @@ import { parseExitStatus, renderJobRead, renderPromoted, renderResult } from './
 export const name = 'tool-bash'
 export const inject = ['tools', 'shell', 'systemPrompt', 'shellEnv']
 
+// Result-cap parity with dsh-tool-pwsh (pwsh-tool-bash-parity Agent Note); the
+// mirrored declaration is deliberate, so clone detection skips it.
+/* jscpd:ignore-start */
+/** Default cap for one complete model-facing result of a background job. */
+export const DEFAULT_MAX_RESULT_BYTES = 256 * 1024
+
 /** Configuration for the bash tool. */
 export interface Config {
   /**
@@ -50,13 +56,21 @@ export interface Config {
    * controller) also runs under the deadline kill.
    */
   promoteOnTimeout?: boolean
+  /**
+   * UTF-8 byte cap for one complete model-facing result of a background job:
+   * each `job_output` read, its terminal kill status, and its completion
+   * notice (default 256KiB). Foreground results keep the executor's own bound.
+   */
+  maxResultBytes?: number
 }
 
 /** Runtime configuration schema for the bash tool plugin. */
 export const Config: z<Config> = z.object({
   enableRunInBackground: z.boolean().default(true),
   promoteOnTimeout: z.boolean().default(true),
+  maxResultBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_RESULT_BYTES),
 })
+/* jscpd:ignore-end */
 
 /** Parsed tool args; execute validates value constraints absent from ParameterSchemaSpec. */
 interface BashToolArgs {
@@ -231,9 +245,11 @@ const BACKGROUND_OUTPUT_PROPERTIES = {
 
 export function apply(ctx: Context, config: Config = {}): void {
   const backgroundEnabled = config.enableRunInBackground ?? true
-  // Keeping a timed-out command needs the whole background surface: the job
-  // tools to collect and stop it, and the registry itself at execution time.
   const promoteOnTimeout = (config.promoteOnTimeout ?? true) && backgroundEnabled
+  const maxResultBytes = config.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES
+  if (!Number.isSafeInteger(maxResultBytes) || maxResultBytes < 1) {
+    throw new Error('tool-bash: maxResultBytes must be a positive whole number of bytes')
+  }
   const defaultMode = ctx.shell.sandboxMode
   const escalationModes: readonly SandboxMode[] = defaultMode === undefined ? [] : ESCALATION_TARGETS
   const sandboxPolicy: SandboxPolicyService | undefined = defaultMode === undefined ? undefined : ctx.get('sandboxPolicy')
@@ -299,6 +315,10 @@ export function apply(ctx: Context, config: Config = {}): void {
       const id = registry.start({
         kind: 'bash',
         label: args.command,
+        // The model-facing cap bounds each job_output read, its terminal kill
+        // status, and its completion notice; the executor's in-memory window
+        // is a separate, process-side bound.
+        outputLimitBytes: maxResultBytes,
         ...exec.agent ? { owner: exec.agent.id } : {},
         output: processSources(() => proc),
         run: () => {

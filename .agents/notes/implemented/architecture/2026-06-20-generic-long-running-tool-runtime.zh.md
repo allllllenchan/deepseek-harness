@@ -73,7 +73,7 @@ job id 在运行时全局可见且可预测，因此注册表会授权每次访�
 
 `dsh-tool-jobs` 注册三个与 kind 无关的工具，并使用通用 UI 卡片：
 
-- `job_output(job_id, wait?, timeout_ms?)` 读取输出，并始终追加 `[status: ...]`。流式任务只返回上次读取以来的输出；最终输出任务在结算后返回结果。除非指定 `wait: true`，否则读取不会阻塞；等待超时由插件配置提供默认值并限定上限。等待超时会报告仍在运行的状态，不会停止任务。
+- `job_output(job_id, wait?, timeout_ms?, pattern?, tail_lines?, max_bytes?)` 读取输出，并始终追加 `[status: ...]`。流式任务只返回上次读取以来的输出；最终输出任务在结算后返回结果。除非指定 `wait: true`，否则读取不会阻塞；等待超时由插件配置提供默认值并限定上限；给定 `pattern` 时，该等待会在字面文本一出现在输出中就结束。等待超时会报告仍在运行的状态，不会停止任务，而 `tail_lines`／`max_bytes` 限定单次读取返回的内容（见[输出条件决策](../feature/2026-09-23-job-output-output-conditions.zh.md)）。
 - `job_list()` 将调用方可见的任务返回为 `<id> [<kind>] <status> — <label>`，没有任务时返回 `(no background jobs)`。
 - `job_kill(job_id, reason?)` 立即请求取消。可选的已记录原因会转发给生产方。终止任务报告现有状态；生产方的取消操作若抛出，调用便会失败，任务保持运行。
 

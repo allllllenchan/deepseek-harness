@@ -73,7 +73,7 @@ A producer loaded without any controller would let callers start work they canno
 
 `dsh-tool-jobs` registers three kind-independent tools with generic UI cards:
 
-- `job_output(job_id, wait?, timeout_ms?)` reads output and always appends `[status: ...]`. Stream tasks return only output since the previous read; final-output tasks return their result after settlement. Reads are non-blocking unless `wait: true`, whose timeout is defaulted and capped by plugin config. A wait timeout reports the still-running status and does not stop the task.
+- `job_output(job_id, wait?, timeout_ms?, pattern?, tail_lines?, max_bytes?)` reads output and always appends `[status: ...]`. Stream tasks return only output since the previous read; final-output tasks return their result after settlement. Reads are non-blocking unless `wait: true`, whose timeout is defaulted and capped by plugin config; a `pattern` ends that wait as soon as the literal text appears in the output. A wait timeout reports the still-running status and does not stop the task, and `tail_lines`/`max_bytes` bound what one read returns ([output conditions](../feature/2026-09-23-job-output-output-conditions.md)).
 - `job_list()` returns caller-visible tasks as `<id> [<kind>] <status> — <label>`, or `(no background jobs)`.
 - `job_kill(job_id, reason?)` requests cancellation immediately. The optional logged reason is forwarded to the producer. Terminal tasks report their existing status; a throwing producer cancel fails the call and leaves the task running.
 

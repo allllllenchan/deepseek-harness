@@ -47,6 +47,7 @@ kind: "package-reference"
 |---|---|---|
 | `enableRunInBackground` | `true` | 组合中有 job 注册表时暴露 `run_in_background`；为 `false` 时拒绝强制后台调用 |
 | `promoteOnTimeout` | `true` | 到达超时的前台命令继续作为它的后台任务运行，而不是杀掉它 |
+| `maxResultBytes` | `262144` | 后台任务单个完整结果的字节上限：一次 `job_output` 读取、其终态 kill 状态或完成通知 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-bash)是每个受支持字段及其 JSDoc 的穷尽式真源；生成的[工具目录](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-bash)携带完整参数 schema。
 
@@ -183,7 +184,7 @@ renderer 输出依数据而定的 stdout 尾部，再输出可选的 `[stderr]` 
 
 #### Token 影响
 
-启动确认很短且会保留；收集到的输出依数据而定，并受执行器流缓冲区限制。消费式读取不会重复先前输出。
+启动确认很短且会保留；收集到的输出依数据而定，并受执行器流缓冲区限制，`maxResultBytes` 进一步限定后台任务的单个完整结果。消费式读取不会重复先前输出。
 
 #### KV Cache 影响
 

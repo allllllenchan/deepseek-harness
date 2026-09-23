@@ -1989,7 +1989,7 @@ Source: [`packages/jobs/tool-jobs/src/index.ts`](../packages/jobs/tool-jobs/src/
 
 ### `job_output`
 
-Read a background job. Stream jobs return only output since the previous read; final-output jobs return their result after settlement. Every response ends with `[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap.
+Read a background job. Stream jobs return only output since the previous read; final-output jobs return their result after settlement. Every response ends with `[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap and returns early once `pattern` appears in the output. `tail_lines` and `max_bytes` bound what is returned.
 
 ```json
 {
@@ -2001,11 +2001,23 @@ Read a background job. Stream jobs return only output since the previous read; f
     },
     "wait": {
       "type": "boolean",
-      "description": "Block until the job reaches a terminal status or the timeout expires. A timed-out wait returns [status: running] and leaves the job alive."
+      "description": "Block until the job reaches a terminal status, the timeout expires, or a supplied `pattern` appears. A timed-out wait returns [status: running] and leaves the job alive."
     },
     "timeout_ms": {
       "type": "number",
       "description": "Max wait in milliseconds (only meaningful with wait: true). Defaults to the configured wait timeout; capped by the configured maximum."
+    },
+    "pattern": {
+      "type": "string",
+      "description": "Literal text to wait for (only meaningful with wait: true). The wait ends at the first read whose output contains it — before the job itself ends — and returns the output read so far, including that text."
+    },
+    "tail_lines": {
+      "type": "number",
+      "description": "Return only the last N lines of the output. Earlier lines were already read and are not returned by a later call."
+    },
+    "max_bytes": {
+      "type": "number",
+      "description": "Cap on the complete returned result in UTF-8 bytes, including the [status: ...] line. The tighter of this and the job's own output cap applies."
     }
   },
   "required": [

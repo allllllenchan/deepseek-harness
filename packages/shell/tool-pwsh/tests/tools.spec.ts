@@ -19,6 +19,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import { JobId } from '@deepseek-ai/dsh-jobs'
 import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -788,6 +789,34 @@ describe('background execution through the job runtime', () => {
     // A later read reports the terminal outcome in the generic status line.
     const final = await callUntilText(ctx, 'job_output', { job_id: 'pwsh-1' }, '[status: completed, exit code: 0]')
     expect(final.isError).toBe(false)
+  })
+
+  it('declares the model-facing result cap on the job it starts', async () => {
+    const { ctx } = await setupWithJobs()
+    await call(ctx, 'pwsh', { command: 'Write-Output bg-ok', description: 'test command', run_in_background: true })
+
+    expect(ctx.jobs.get(JobId('pwsh-1')).outputLimitBytes).toBe(ToolPwsh.DEFAULT_MAX_RESULT_BYTES)
+  })
+
+  it('bounds a background read with the configured maxResultBytes', async () => {
+    const { ctx, bash } = await setupWithJobs({ maxResultBytes: 64 })
+    bash.backgroundHandler = () => fakeProcess('x'.repeat(500))
+    const started = await call(ctx, 'pwsh', {
+      command: 'Write-Output long', description: 'long output', run_in_background: true,
+    })
+    expect(text(started)).toBe('started background job pwsh-1')
+
+    const read = await call(ctx, 'job_output', { job_id: 'pwsh-1' })
+    expect(Buffer.byteLength(text(read))).toBeLessThanOrEqual(64)
+    expect(text(read)).toContain('[output truncated]')
+  })
+
+  it('rejects a non-positive maxResultBytes when apply() receives a bare config', async () => {
+    // The schema carries the same bound; this pins apply()'s own guard for a
+    // programmatic embedding that bypasses schemastery.
+    const { ctx } = await setupWithJobs()
+    expect(() => { ToolPwsh.apply(ctx, { maxResultBytes: 0 }) })
+      .toThrow('tool-pwsh: maxResultBytes must be a positive whole number of bytes')
   })
 
   it('a running background job is killable through the REAL job_kill tool', async () => {

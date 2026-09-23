@@ -22,6 +22,8 @@ const agentScopeFibers = new WeakMap<Agent, { dispose: () => Promise<void> }>()
 /** Registry knobs a test may narrow; every producer here pushes, so the pump stays idle. */
 interface RegistryConfig {
   retainBytes?: number
+  /** Pull-source poll interval; the pattern-wait tests pump fast. */
+  pumpPollMs?: number
 }
 
 async function setup(config: ToolJobs.Config = {}, registry: RegistryConfig = {}) {
@@ -508,6 +510,207 @@ describe('job_output', () => {
     const unknown = await call(ctx, 'job_output', { job_id: 'bash-99' })
     expect(unknown.isError).toBe(true)
     expect(text(unknown)).toContain('unknown job bash-99')
+  })
+})
+
+describe('job_output output conditions and bounds', () => {
+  /**
+   * A producer whose pull source drains prepared deltas one at a time. `consumed`
+   * records what the registry's pump actually read, so a test can wait for a
+   * read instead of guessing how many poll intervals have passed.
+   */
+  function deltaProducer(overrides: Partial<Omit<JobSpec, 'run' | 'output'>> = {}) {
+    const pending: string[] = []
+    const consumed: string[] = []
+    const p = producer(overrides)
+    const spec: JobSpec = {
+      ...p.spec,
+      output: [{
+        read: (from) => {
+          const delta = pending.shift() ?? ''
+          if (delta.length > 0) consumed.push(delta)
+          return { text: delta, nextOffset: from + Buffer.byteLength(delta), lossy: false }
+        },
+      }],
+    }
+    return { ...p, spec, pending, consumed }
+  }
+
+  /** Fast poll cadences and a roomy wait budget unless a case overrides them. */
+  const fastWait = { patternPollIntervalMs: 1, waitTimeoutMs: 5_000, maxWaitTimeoutMs: 5_000 }
+  const fastPump = { pumpPollMs: 1 }
+
+  it('returns at the pattern, delivering every delta read on the way to it', async () => {
+    const { ctx } = await setup(fastWait, fastPump)
+    const p = deltaProducer()
+    ctx.jobs.start(p.spec)
+
+    const pending = call(ctx, 'job_output', {
+      job_id: 'bash-1', wait: true, pattern: 'HD Assets cooked in Mobile',
+    })
+    p.pending.push('booting\n')
+    await vi.waitFor(() => { expect(p.consumed).toContain('booting\n') })
+    p.pending.push('cooking package 1\n')
+    await vi.waitFor(() => { expect(p.consumed).toContain('cooking package 1\n') })
+    p.pending.push('HD Assets cooked in Mobile (2100 total)\n')
+
+    const result = await pending
+    expect(result.isError).toBe(false)
+    // Everything consumed before the match is part of the answer: the wait is
+    // still the job's single reader, so a later call could never recover it.
+    expect(text(result)).toBe(
+      'booting\ncooking package 1\nHD Assets cooked in Mobile (2100 total)\n[status: running]',
+    )
+    // The pattern ended the wait, not settlement: the job is still alive.
+    expect(ctx.jobs.get(JobId('bash-1')).status).toBe('running')
+    // The cursor advanced past every delivered delta, so nothing is repeated.
+    expect(text(await call(ctx, 'job_output', { job_id: 'bash-1' })))
+      .toBe('(no new output)\n[status: running]')
+  })
+
+  it('finds a pattern split across two reads', async () => {
+    const { ctx } = await setup(fastWait, fastPump)
+    const p = deltaProducer()
+    ctx.jobs.start(p.spec)
+
+    const pending = call(ctx, 'job_output', { job_id: 'bash-1', wait: true, pattern: 'cooked in Mobile' })
+    p.pending.push('HD Assets coo')
+    await vi.waitFor(() => { expect(p.consumed).toEqual(['HD Assets coo']) })
+    p.pending.push('ked in Mobile (2100)\n')
+
+    expect(text(await pending)).toBe('HD Assets cooked in Mobile (2100)\n[status: running]')
+  })
+
+  it('times out against a live job with the pattern absent, keeping the output read', async () => {
+    const { ctx } = await setup({ patternPollIntervalMs: 1, waitTimeoutMs: 20, maxWaitTimeoutMs: 20 }, fastPump)
+    const p = deltaProducer()
+    ctx.jobs.start(p.spec)
+    p.pending.push('still cooking\n')
+
+    const result = await call(ctx, 'job_output', { job_id: 'bash-1', wait: true, pattern: 'never printed' })
+    // A pattern wait that runs out of time is a normal live-status outcome.
+    expect(result.isError).toBe(false)
+    expect(text(result)).toBe('still cooking\n[status: running]')
+  })
+
+  it('returns the terminal output when the job settles without the pattern', async () => {
+    const { ctx } = await setup(fastWait, fastPump)
+    const p = deltaProducer()
+    ctx.jobs.start(p.spec)
+
+    const pending = call(ctx, 'job_output', { job_id: 'bash-1', wait: true, pattern: 'never printed' })
+    await tick()
+    p.pending.push('last line\n')
+    p.settle({ status: 'completed', detail: 'exit code: 0' })
+
+    expect(text(await pending)).toBe('last line\n[status: completed, exit code: 0]')
+  })
+
+  it('keeps only the requested trailing lines and says how many it dropped', async () => {
+    const { ctx } = await setup()
+    const p = producer()
+    ctx.jobs.start(p.spec)
+    p.append('l1\nl2\nl3\nl4\n')
+
+    expect(text(await call(ctx, 'job_output', { job_id: 'bash-1', tail_lines: 2 })))
+      .toBe('[earlier output omitted: 2 lines]\nl3\nl4\n[status: running]')
+  })
+
+  it('names a single dropped line, and leaves output inside the budget untouched', async () => {
+    const { ctx } = await setup()
+    const p = producer()
+    ctx.jobs.start(p.spec)
+    p.append('l1\nl2\n')
+
+    expect(text(await call(ctx, 'job_output', { job_id: 'bash-1', tail_lines: 1 })))
+      .toBe('[earlier output omitted: 1 line]\nl2\n[status: running]')
+    p.append('one line')
+    expect(text(await call(ctx, 'job_output', { job_id: 'bash-1', tail_lines: 3 })))
+      .toBe('one line\n[status: running]')
+  })
+
+  it('caps the complete result at max_bytes and never raises the producer cap', async () => {
+    const { ctx } = await setup()
+    const first = producer()
+    ctx.jobs.start(first.spec)
+    first.append('y'.repeat(200))
+    const second = producer({ outputLimitBytes: 32 })
+    ctx.jobs.start(second.spec)
+    second.append('z'.repeat(200))
+
+    const capped = text(await call(ctx, 'job_output', { job_id: 'bash-1', max_bytes: 64 }))
+    expect(Buffer.byteLength(capped)).toBeLessThanOrEqual(64)
+    expect(capped).toContain('[output truncated]')
+    expect(capped).toContain('[status: running]')
+
+    // The tighter bound wins: a 64-byte request cannot widen a 32-byte producer cap.
+    const tightened = text(await call(ctx, 'job_output', { job_id: 'bash-2', max_bytes: 64 }))
+    expect(Buffer.byteLength(tightened)).toBeLessThanOrEqual(32)
+  })
+
+  it('composes tail_lines and max_bytes with an early pattern hit', async () => {
+    const { ctx } = await setup(fastWait, fastPump)
+    const p = deltaProducer()
+    ctx.jobs.start(p.spec)
+
+    const pending = call(ctx, 'job_output', {
+      job_id: 'bash-1', wait: true, pattern: 'DONE', tail_lines: 1, max_bytes: 128,
+    })
+    p.pending.push('noise\nnoise\n')
+    await vi.waitFor(() => { expect(p.consumed).toHaveLength(1) })
+    p.pending.push('marker line\nDONE\n')
+
+    expect(text(await pending))
+      .toBe('[earlier output omitted: 3 lines]\nDONE\n[status: running]')
+  })
+
+  it('bounds the bytes a pattern wait accumulates and reports what it dropped', async () => {
+    // The live ring holds every byte (retainBytes covers all chunks), so the
+    // only omission is the wait's own retention ceiling at work.
+    const { ctx } = await setup(fastWait, { pumpPollMs: 1, retainBytes: 2_000_000 })
+    const p = deltaProducer()
+    ctx.jobs.start(p.spec)
+    // The match lands in the last delta, so the wait ends exactly once every
+    // byte above the retention ceiling has been read.
+    const chunks = ['x'.repeat(300_000), 'x'.repeat(300_000), 'x'.repeat(300_000),
+      'x'.repeat(300_000), 'x'.repeat(300_000), 'DONE']
+    for (const chunk of chunks) p.pending.push(chunk)
+    const readBytes = chunks.join('').length
+
+    const output = text(await call(ctx, 'job_output', { job_id: 'bash-1', wait: true, pattern: 'DONE' }))
+    expect(output.startsWith(`[earlier output omitted: ${readBytes - ToolJobs.MAX_WAIT_RETENTION_BYTES} bytes]\n`))
+      .toBe(true)
+    expect(output.endsWith('DONE\n[status: running]')).toBe(true)
+    expect(Buffer.byteLength(output)).toBeLessThanOrEqual(ToolJobs.MAX_WAIT_RETENTION_BYTES + 64)
+  })
+
+  it('rejects a pattern without a wait, an empty pattern, and non-positive budgets', async () => {
+    const { ctx } = await setup()
+    ctx.jobs.start(producer().spec)
+
+    const noWait = await call(ctx, 'job_output', { job_id: 'bash-1', pattern: 'x' })
+    expect(noWait.isError).toBe(true)
+    expect(text(noWait)).toContain('waiting for a pattern requires wait: true')
+
+    const empty = await call(ctx, 'job_output', { job_id: 'bash-1', wait: true, pattern: '' })
+    expect(empty.isError).toBe(true)
+    expect(text(empty)).toContain('invalid pattern')
+
+    for (const [field, value] of [['tail_lines', 0], ['tail_lines', 1.5], ['max_bytes', -1]] as const) {
+      const result = await call(ctx, 'job_output', { job_id: 'bash-1', [field]: value })
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain(`invalid ${field}`)
+    }
+  })
+
+  it('rejects an out-of-range pattern poll cadence when apply() receives a bare config', async () => {
+    // The schema carries the same bound; this pins apply()'s own guard for a
+    // programmatic embedding that bypasses schemastery.
+    const { ctx } = await setup()
+    for (const invalid of [0, 1.5]) {
+      expect(() => { ToolJobs.apply(ctx, { patternPollIntervalMs: invalid }) })
+        .toThrow(`patternPollIntervalMs (${invalid}) must be a positive whole number of milliseconds`)
+    }
   })
 })
 

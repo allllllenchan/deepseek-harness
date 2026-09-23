@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Use `dsh-tool-jobs` to inspect and control background commands, PTY work, and subagents through `job_output`, `job_list`, and `job_kill`. Reads can wait within a configured timeout, list results identify each job's kind and status, and cancellation settles only after the work stops. When owned work finishes, the agent receives an in-session notice: busy agents receive it in their next step, while idle agents are woken by a follow-up turn. Configuration controls wait limits, completion delivery, and an optional cap on consecutive wakeups. Stream output is consumed by one reader, and pending notices do not survive owner disposal.
+Use `dsh-tool-jobs` to inspect and control background commands, PTY work, and subagents through `job_output`, `job_list`, and `job_kill`. Reads can wait within a configured timeout, return early when a pattern appears, and bound their own result; list results identify each job's kind and status, and cancellation settles only after the work stops. When owned work finishes, the agent receives an in-session notice: busy agents receive it in their next step, while idle agents are woken by a follow-up turn. Configuration controls wait limits, pattern-wait polling, completion delivery, and an optional cap on consecutive wakeups. Stream output is consumed by one reader, and pending notices do not survive owner disposal.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ Load this plugin in any composition where the agent should start, observe, and s
 
 ### The three tools
 
-- `job_output(job_id, wait?, timeout_ms?)` — Read a job's output. Stream jobs return only the output since the previous read; final-output jobs return their result after settlement. Every response ends with `[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap and leaves a still-running job alive on timeout. A read renders stdout first and stderr in one `[stderr]` section, notes output that left memory before the read, and carries a job's result (a subagent's answer) exactly once, on the first read after settlement.
+- `job_output(job_id, wait?, timeout_ms?, pattern?, tail_lines?, max_bytes?)` — Read a job's output. Stream jobs return only the output since the previous read; final-output jobs return their result after settlement. Every response ends with `[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap and leaves a still-running job alive on timeout; a `pattern` ends that wait at the first read whose output contains the literal text — before the job itself ends — and the call returns the output read so far, including that text. `tail_lines` returns only the last N lines, and `max_bytes` caps the complete result. A read renders stdout first and stderr in one `[stderr]` section, notes output that left memory before the read, and carries a job's result (a subagent's answer) exactly once, on the first read after settlement.
 - `job_list()` — List your background jobs with their ids, kinds, and statuses, one per line: `<id> [<kind>] <status> — <label>`.
 - `job_kill(job_id, reason?)` — Request cancellation of a running job immediately; the job settles as `killed` once its work actually stops. A terminal job returns its current snapshot, and the optional reason is recorded and forwarded to the job.
 
@@ -53,6 +53,7 @@ Loading the plugin with no config is the common path; a `waitTimeoutMs` above `m
 |---|---|---|
 | `waitTimeoutMs` | `30,000` | Wait used when `wait: true` omits `timeout_ms` |
 | `maxWaitTimeoutMs` | `600,000` | Cap for model-supplied waits; larger values clamp down to it |
+| `patternPollIntervalMs` | `250` | Cadence at which a `pattern` wait re-reads output to test the pattern |
 | `completionDelivery` | `wakeup` | `wakeup` opens a turn on an idle owner; `quiet` leaves the notice pending |
 | `maxConsecutiveWakes` | unset | Turns one owner may open by wake before notices degrade to injection; unset means no cap |
 
@@ -88,7 +89,11 @@ This section explains the design decisions behind the tools and points at the co
 
 ### Output capping
 
-`job_output` and `job_kill` capture the caller-visible job in a prepended pre-execute listener before policy runs, so the producer's cap applies to the complete rendered result. `job_output` preserves its output/status split when policy left the default rendering intact, bounding the output tail and the `[status: ...]` suffix; other single-text results — denials, short-circuits, normalized tool or pipeline failures, replacements, and blocks — are bounded as one text, while structured multi-block policy results keep their shape. A bounded completion notice reserves the stable `background job <id>` prefix and the `job_output` collection instruction before spending remaining bytes on variable kind, label, status, detail, and truncation marker, so the notice stays actionable at the PTY's supported 64-byte minimum; an existing producer truncation marker is reused rather than duplicated.
+`job_output` and `job_kill` capture the caller-visible job in a prepended pre-execute listener before policy runs, so the producer's cap applies to the complete rendered result. A caller's `max_bytes` may only tighten that cap, so the complete result — output plus the `[status: ...]` suffix — is bounded by the smaller of the two through the same truncation. `job_output` preserves its output/status split when policy left the default rendering intact, bounding the output tail and the `[status: ...]` suffix; other single-text results — denials, short-circuits, normalized tool or pipeline failures, replacements, and blocks — are bounded as one text, while structured multi-block policy results keep their shape. A bounded completion notice reserves the stable `background job <id>` prefix and the `job_output` collection instruction before spending remaining bytes on variable kind, label, status, detail, and truncation marker, so the notice stays actionable at the PTY's supported 64-byte minimum; an existing producer truncation marker is reused rather than duplicated.
+
+### Pattern waits
+
+`wait: true` with `pattern` reads the job on each `patternPollIntervalMs` tick and returns at the first read whose output contains the literal pattern, so a marker line ends the wait without ending the job. The wait stays the job's only output consumer: every delta it reads is retained and returned, so output consumed on the way to the match reaches the model instead of being lost, and a match split across two reads is still found. A terminal status, the deadline, and caller cancellation end the wait with the output read so far and the live job state; none of them is an error. `tail_lines` keeps the trailing lines of that text, and each bound that dropped content — the line budget, `max_bytes`, or the internal retention ceiling a wait without a byte budget applies — states what it dropped at the head of the returned text.
 
 ### Notice delivery lanes
 
@@ -154,11 +159,11 @@ Prefix-stable while tool definitions and visibility are unchanged. Registration 
 
 #### What the model sees
 
-Reads return output or `(no new output)` followed by `[status: <status>]` and optional detail. An empty list returns `(no background jobs)`. Kill returns `requested cancellation of job <id>` or the existing terminal status. An owned completion the model has not already collected uses the notice above.
+Reads return output or `(no new output)` followed by `[status: <status>]` and optional detail. A bounded read prefixes `[earlier output omitted: <count> lines]` or `[earlier output omitted: <count> bytes]` when a budget dropped content, and the byte cap appends `[output truncated]`. An empty list returns `(no background jobs)`. Kill returns `requested cancellation of job <id>` or the existing terminal status. An owned completion the model has not already collected uses the notice above.
 
 #### Token effect
 
-Results and notices remain in parent history until compaction. Stream reads do not repeat consumed output; a producer-supplied `outputLimitBytes` bounds each complete read or notice. Under `wakeup`, a notice reaching an idle owner also buys a model request the user did not ask for, capped per owner only when `maxConsecutiveWakes` is set; a notice reaching a busy owner adds a step to the turn it is already paying for.
+Results and notices remain in parent history until compaction. Stream reads do not repeat consumed output; a producer-supplied `outputLimitBytes` bounds each complete read or notice, and a caller's `max_bytes`, `tail_lines`, or a pattern wait's own retention ceiling can only tighten what one read returns. Under `wakeup`, a notice reaching an idle owner also buys a model request the user did not ask for, capped per owner only when `maxConsecutiveWakes` is set; a notice reaching a busy owner adds a step to the turn it is already paying for.
 
 #### KV Cache effect
 
@@ -175,6 +180,7 @@ These limits define when the tools are a poor fit. They are current package cons
 - **A spent wake budget is not restored by time** — with `maxConsecutiveWakes` set, only user-authored input refills it, so an unattended agent whose budget ran out collects its remaining notices on the next turn something else opens, and nothing in the client shows that a notice is waiting.
 - **A notice pending on an idle owner does not survive that owner's disposal** — the disposal cancel clears the unclaimed inbox, and the log keeps the insert/cancel pair as the record.
 - **Model reads are single-consumer** — independent observers use the registry's non-consuming `readAt` (the Web client's `job.follow`), not these tools.
+- **A pattern wait reacts on its poll tick** — the match is noticed up to one `patternPollIntervalMs` after the bytes arrive, because the registry exposes no per-output notification a waiter could subscribe to.
 - **Unowned jobs have no session fence** — external callers must supply policy or avoid them.
 
 <a id="dev-note"></a>
