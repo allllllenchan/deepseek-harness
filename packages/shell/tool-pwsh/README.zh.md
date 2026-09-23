@@ -41,11 +41,12 @@ kind: "package-reference"
 - name: '@deepseek-ai/dsh-tool-pwsh'
 ```
 
-唯一的配置字段用于开关后台支持。
+两个配置字段分别控制后台支持与面向模型的结果上限。
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `enableRunInBackground` | `true` | 暴露 `run_in_background`；为 `false` 时拒绝强制后台调用 |
+| `maxResultBytes` | `262144` | 后台任务单个完整结果的字节上限：一次 `job_output` 读取、其终态 kill 状态或完成通知 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-pwsh)是每个受支持字段及其 JSDoc 的穷尽式真源；生成的[工具目录](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-pwsh)携带完整参数 schema。
 

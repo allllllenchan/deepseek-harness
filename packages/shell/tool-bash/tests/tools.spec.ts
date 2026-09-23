@@ -13,6 +13,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import { JobId } from '@deepseek-ai/dsh-jobs'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
@@ -48,7 +49,7 @@ async function setup() {
 }
 
 /** Full harness: the generic job runtime + its controller, then the bash tool. */
-async function setupWithTasks() {
+async function setupWithTasks(toolConfig: Partial<ToolBash.Config> = {}) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
@@ -59,7 +60,7 @@ async function setupWithTasks() {
   ;(ctx.subprocess as LocalSubprocessRuntime).internals = { spillDir }
   await ctx.plugin(BashEnvPlugin)
   await ctx.plugin(LocalBashExecutor, { timeoutMs: 10_000, graceMs: 200 })
-  await ctx.plugin(ToolBash)
+  await ctx.plugin(ToolBash, toolConfig)
   return ctx
 }
 
@@ -468,6 +469,29 @@ describe('background execution through the job runtime', () => {
     // A later read reports the terminal outcome in the generic status line.
     const final = await callUntilText(ctx, 'job_output', { job_id: 'bash-1' }, '[status: completed, exit code: 0]')
     expect(final.isError).toBe(false)
+  })
+
+  it('declares the model-facing result cap on the job it starts', async () => {
+    const tight = await setupWithTasks({ maxResultBytes: 64 })
+    await call(tight, 'bash', { command: 'sleep 60', description: 'test command', run_in_background: true })
+    expect(tight.jobs.get(JobId('bash-1')).outputLimitBytes).toBe(64)
+
+    const plain = await setupWithTasks()
+    await call(plain, 'bash', { command: 'sleep 60', description: 'test command', run_in_background: true })
+    expect(plain.jobs.get(JobId('bash-1')).outputLimitBytes).toBe(ToolBash.DEFAULT_MAX_RESULT_BYTES)
+
+    for (const ctx of [tight, plain]) {
+      await call(ctx, 'job_kill', { job_id: 'bash-1' })
+      await call(ctx, 'job_output', { job_id: 'bash-1', wait: true }) // await settlement — no orphan
+    }
+  })
+
+  it('rejects a non-positive maxResultBytes when apply() receives a bare config', async () => {
+    // The schema carries the same bound; this pins apply()'s own guard for a
+    // programmatic embedding that bypasses schemastery.
+    const ctx = await setupWithTasks()
+    expect(() => { ToolBash.apply(ctx, { maxResultBytes: 0 }) })
+      .toThrow('tool-bash: maxResultBytes must be a positive whole number of bytes')
   })
 
   it('a running background job is killable through the REAL job_kill tool', async () => {

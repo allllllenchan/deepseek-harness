@@ -47,16 +47,30 @@ declare module '@deepseek-ai/dsh-jobs' {
 export const name = 'tool-pwsh'
 export const inject = ['tools', 'shell', 'systemPrompt', 'shellEnv']
 
+// Result-cap parity with dsh-tool-bash (pwsh-tool-bash-parity Agent Note); the
+// mirrored declaration is deliberate, so clone detection skips it.
+/* jscpd:ignore-start */
+/** Default cap for one complete model-facing result of a background job. */
+export const DEFAULT_MAX_RESULT_BYTES = 256 * 1024
+
 /** Configuration for the pwsh tool. */
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /**
+   * UTF-8 byte cap for one complete model-facing result of a background job:
+   * each `job_output` read, its terminal kill status, and its completion
+   * notice (default 256KiB). Foreground results keep the executor's own bound.
+   */
+  maxResultBytes?: number
 }
 
 /** Runtime configuration schema for the pwsh tool plugin. */
 export const Config: z<Config> = z.object({
   enableRunInBackground: z.boolean().default(true),
+  maxResultBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_RESULT_BYTES),
 })
+/* jscpd:ignore-end */
 
 /** Parsed tool args; execute validates value constraints absent from ParameterSchemaSpec. */
 interface PwshToolArgs {
@@ -193,6 +207,10 @@ const BACKGROUND_OUTPUT_PROPERTIES = {
 /* jscpd:ignore-start -- deliberate mirror of dsh-tool-bash's apply() preamble (pwsh-tool-and-executor Agent Note). */
 export function apply(ctx: Context, config: Config = {}): void {
   const backgroundEnabled = config.enableRunInBackground ?? true
+  const maxResultBytes = config.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES
+  if (!Number.isSafeInteger(maxResultBytes) || maxResultBytes < 1) {
+    throw new Error('tool-pwsh: maxResultBytes must be a positive whole number of bytes')
+  }
   const defaultMode = ctx.shell.sandboxMode
   const escalationModes: readonly SandboxMode[] = defaultMode === undefined ? [] : ESCALATION_TARGETS
   const sandboxPolicy: SandboxPolicyService | undefined = defaultMode === undefined ? undefined : ctx.get('sandboxPolicy')
@@ -380,6 +398,11 @@ export function apply(ctx: Context, config: Config = {}): void {
         const id = jobs.start({
           kind: 'pwsh',
           label: args.command,
+          // The executor's in-memory window bounds the process's retained
+          // output, not the model-facing read: declare the model-facing cap
+          // here so a lossy read or a large configured window still cannot
+          // return an unbounded result.
+          outputLimitBytes: maxResultBytes,
           ...exec.agent ? { owner: exec.agent } : {},
           run: () => {
             const proc = ctx.shell.start(ctx.shell.resolve(request))

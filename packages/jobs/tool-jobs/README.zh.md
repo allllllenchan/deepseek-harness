@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-使用 `dsh-tool-jobs`，可通过 `job_output`、`job_list` 与 `job_kill` 检查和控制后台命令、PTY 工作与 subagent。读取可在配置的超时内等待，列表结果标识各任务的 kind 与状态，而取消只有在工作停止后才结算。归属明确的工作完成时，agent（智能体）会收到会话内通知：繁忙的 agent 在下一步收到通知，空闲的 agent 则可能由有界的 follow-up 轮次唤醒。配置控制等待上限、完成投递与连续唤醒次数。流输出仅供单一读取方消费，待领通知无法在所有者释放后存活。
+使用 `dsh-tool-jobs`，可通过 `job_output`、`job_list` 与 `job_kill` 检查和控制后台命令、PTY 工作与 subagent。读取可在配置的超时内等待、在 pattern 出现时提前返回，并限定自身结果大小；列表结果标识各任务的 kind 与状态，而取消只有在工作停止后才结算。归属明确的工作完成时，agent（智能体）会收到会话内通知：繁忙的 agent 在下一步收到通知，空闲的 agent 则可能由有界的 follow-up 轮次唤醒。配置控制等待上限、pattern 等待的轮询、完成投递与连续唤醒次数。流输出仅供单一读取方消费，待领通知无法在所有者释放后存活。
 
 ## 目录
 
@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 三个工具
 
-- `job_output(job_id, wait?, timeout_ms?)`——读取任务输出。流任务只返回自上次读取以来的输出；最终输出任务在结算后返回其结果。每个响应都以 `[status: ...]` 结尾。除非 `wait: true`，否则读取是非阻塞的；`wait: true` 最多等待到配置上限，超时时仍让运行中的任务保持存活。
+- `job_output(job_id, wait?, timeout_ms?, pattern?, tail_lines?, max_bytes?)`——读取任务输出。流任务只返回自上次读取以来的输出；最终输出任务在结算后返回其结果。每个响应都以 `[status: ...]` 结尾。除非 `wait: true`，否则读取是非阻塞的；`wait: true` 最多等待到配置上限，超时时仍让运行中的任务保持存活；给定 `pattern` 时，该等待会在某次读取的输出包含该字面文本时结束——不必等任务结束——并返回迄今读到的输出（含该文本）。`tail_lines` 只返回末尾 N 行，`max_bytes` 限定完整结果的大小。
 - `job_list()`——列出你的后台任务及其 id、kind 与状态，每行一个：`<id> [<kind>] <status> — <label>`。
 - `job_kill(job_id, reason?)`——立即请求取消运行中的任务；任务在其工作真正停止后以 `killed` 结算。终止任务返回其当前快照，可选的原因会被记录并转发给任务。
 
@@ -53,6 +53,7 @@ kind: "package-reference"
 |---|---|---|
 | `waitTimeoutMs` | `30,000` | `wait: true` 省略 `timeout_ms` 时使用的等待时间 |
 | `maxWaitTimeoutMs` | `600,000` | 模型所给等待时间的上限；更大的值向下收敛到它 |
+| `patternPollIntervalMs` | `250` | `pattern` 等待为检测该 pattern 而重新读取输出的节奏 |
 | `completionDelivery` | `wakeup` | `wakeup` 为空闲所有者开启一轮；`quiet` 让通知继续待领 |
 | `maxConsecutiveWakes` | `3` | 一个所有者可由唤醒开启的轮数，超出后通知降级为注入 |
 
@@ -87,7 +88,11 @@ kind: "package-reference"
 
 ### 输出上限
 
-`job_output` 与 `job_kill` 会在策略运行前于前置的 pre-execute 监听器中捕获调用方可见任务，因此生产方上限适用于完整渲染结果。`job_output` 在策略保留默认渲染时保持其输出／状态拆分，对输出尾部与 `[status: ...]` 后缀设界；其他单文本结果——拒绝、短路、规范化工具或流水线失败、替换与阻止——按单个文本设界，而结构化多块策略结果保持自身形状。有界完成通知先为稳定的 `background job <id>` 前缀与 `job_output` 收集指令预留空间，再把剩余字节用于可变的 kind、label、status、detail 与截断标记，因此在 PTY 支持的 64 字节下限下通知仍可操作；已有的生产方截断标记会被复用，不会重复添加。
+`job_output` 与 `job_kill` 会在策略运行前于前置的 pre-execute 监听器中捕获调用方可见任务，因此生产方上限适用于完整渲染结果。调用方的 `max_bytes` 只能收紧该上限，因此完整结果——输出加上 `[status: ...]` 后缀——经由同一套截断被两者中较小者限定。`job_output` 在策略保留默认渲染时保持其输出／状态拆分，对输出尾部与 `[status: ...]` 后缀设界；其他单文本结果——拒绝、短路、规范化工具或流水线失败、替换与阻止——按单个文本设界，而结构化多块策略结果保持自身形状。有界完成通知先为稳定的 `background job <id>` 前缀与 `job_output` 收集指令预留空间，再把剩余字节用于可变的 kind、label、status、detail 与截断标记，因此在 PTY 支持的 64 字节下限下通知仍可操作；已有的生产方截断标记会被复用，不会重复添加。
+
+### Pattern 等待
+
+带 `pattern` 的 `wait: true` 每隔 `patternPollIntervalMs` 读取一次任务，并在某次读取的输出包含该字面 pattern 时返回，因此一条标记行可结束等待而不结束任务。该等待始终是任务唯一的输出消费方：它读到的每个增量都会被保留并返回，因此通往命中途中消费掉的输出会送达模型而不会丢失，跨两次读取断开的匹配也仍能被发现。终止状态、截止时间与调用方取消都以「已读到的输出 + 任务实时状态」结束等待；三者都不是错误。`tail_lines` 保留该文本的末尾行，而每个丢弃了内容的限额——行数预算、`max_bytes`，或未给出字节预算的等待所施加的内部保留上限——都会在返回文本开头说明丢弃了多少。
 
 ### 通知投递通道
 
@@ -153,11 +158,11 @@ Track every background job id you start. You are notified in-session when a job 
 
 #### 模型看到什么
 
-读取会返回输出或 `(no new output)`，随后是 `[status: <status>]` 和可选 detail。空列表返回 `(no background jobs)`。kill 返回 `requested cancellation of job <id>` 或现有终止状态。尚未报告且有所有者归属的完成使用上述通知。
+读取会返回输出或 `(no new output)`，随后是 `[status: <status>]` 和可选 detail。当某个限额丢弃了内容时，有界读取会在开头加上 `[earlier output omitted: <count> lines]` 或 `[earlier output omitted: <count> bytes]`，字节上限则追加 `[output truncated]`。空列表返回 `(no background jobs)`。kill 返回 `requested cancellation of job <id>` 或现有终止状态。尚未报告且有所有者归属的完成使用上述通知。
 
 #### Token 影响
 
-结果与通知在压缩（compaction）前保留于父级历史。流读取不会重复已消费的输出；生产方提供的 `outputLimitBytes` 会限制每次完整读取或通知。在 `wakeup` 下，抵达空闲所有者的通知还会额外买下一次用户并未要求的模型请求，其数量按所有者由 `maxConsecutiveWakes` 封顶；抵达繁忙所有者的通知则只是给它已经在支付的那一轮加一步。
+结果与通知在压缩（compaction）前保留于父级历史。流读取不会重复已消费的输出；生产方提供的 `outputLimitBytes` 会限制每次完整读取或通知，而调用方的 `max_bytes`、`tail_lines` 或 pattern 等待自身的保留上限都只能收紧单次读取返回的内容。在 `wakeup` 下，抵达空闲所有者的通知还会额外买下一次用户并未要求的模型请求，其数量按所有者由 `maxConsecutiveWakes` 封顶；抵达繁忙所有者的通知则只是给它已经在支付的那一轮加一步。
 
 #### KV Cache 影响
 
@@ -174,6 +179,7 @@ Track every background job id you start. You are notified in-session when a job 
 - **已花掉的唤醒预算不会随时间恢复**——只有用户撰写的输入才能补充，因此预算耗尽的无人值守 agent 要等到其他原因开启下一轮时才收走剩余通知。
 - **待领于空闲所有者的通知无法在该所有者释放后存活**——释放时的取消会清空未领取的 inbox，日志保留插入/取消这一对作为记录。
 - **流读取只有单一消费方**——独立观察者需要另一套运行时 API。
+- **pattern 等待按其轮询节奏反应**——字节到达后最多再过一个 `patternPollIntervalMs` 才会察觉匹配，因为注册表没有可供等待方订阅的输出通知。
 - **无 owner 的任务没有会话隔离**——外部调用方必须提供策略或避开这些任务。
 
 <a id="dev-note"></a>

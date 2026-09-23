@@ -2719,10 +2719,16 @@ export type TokenMeterConfig = Record<string, never>
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /**
+   * UTF-8 byte cap for one complete model-facing result of a background job:
+   * each `job_output` read, its terminal kill status, and its completion
+   * notice (default 256KiB). Foreground results keep the executor's own bound.
+   */
+  maxResultBytes?: number
 }
 ```
 
-来源：[`packages/shell/tool-bash/src/index.ts:33`](../packages/shell/tool-bash/src/index.ts)
+来源：[`packages/shell/tool-bash/src/index.ts:39`](../packages/shell/tool-bash/src/index.ts)
 
 <a id="deepseek-aidsh-tool-bash-persistent"></a>
 
@@ -2832,6 +2838,12 @@ export interface Config {
   waitTimeoutMs?: number
   /** Hard cap on any single wait; a larger model-supplied `timeout_ms` is clamped down to it (default 10min). */
   maxWaitTimeoutMs?: number
+  /**
+   * Cadence at which a `pattern` wait re-reads the job to test the pattern
+   * (default 250ms). A lower value detects the match sooner; a higher one costs
+   * fewer reads. The wait's own `timeout_ms` is unaffected.
+   */
+  patternPollIntervalMs?: number
   /** Whether a completion opens a turn on an idle owner (default `wakeup`). */
   completionDelivery?: CompletionDelivery
   /**
@@ -2851,7 +2863,7 @@ export interface Config {
 export type CompletionDelivery = 'quiet' | 'wakeup'
 ```
 
-来源：[`packages/jobs/tool-jobs/src/index.ts:31`](../packages/jobs/tool-jobs/src/index.ts)
+来源：[`packages/jobs/tool-jobs/src/index.ts:32`](../packages/jobs/tool-jobs/src/index.ts)
 
 <a id="deepseek-aidsh-tool-lsp"></a>
 
@@ -2900,10 +2912,16 @@ export interface Config {
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /**
+   * UTF-8 byte cap for one complete model-facing result of a background job:
+   * each `job_output` read, its terminal kill status, and its completion
+   * notice (default 256KiB). Foreground results keep the executor's own bound.
+   */
+  maxResultBytes?: number
 }
 ```
 
-来源：[`packages/shell/tool-pwsh/src/index.ts:51`](../packages/shell/tool-pwsh/src/index.ts)
+来源：[`packages/shell/tool-pwsh/src/index.ts:57`](../packages/shell/tool-pwsh/src/index.ts)
 
 <a id="deepseek-aidsh-tool-pwsh-persistent"></a>
 

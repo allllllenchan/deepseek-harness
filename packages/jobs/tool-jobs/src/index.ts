@@ -11,6 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { boundContextSummary, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { TextRetainer } from '@deepseek-ai/dsh-output-retention'
+import type { Omitted } from '@deepseek-ai/dsh-output-retention'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, ToolDefinition, ToolExecution } from '@deepseek-ai/dsh-tools'
 import { JobId } from '@deepseek-ai/dsh-jobs'
@@ -33,6 +34,12 @@ export interface Config {
   waitTimeoutMs?: number
   /** Hard cap on any single wait; a larger model-supplied `timeout_ms` is clamped down to it (default 10min). */
   maxWaitTimeoutMs?: number
+  /**
+   * Cadence at which a `pattern` wait re-reads the job to test the pattern
+   * (default 250ms). A lower value detects the match sooner; a higher one costs
+   * fewer reads. The wait's own `timeout_ms` is unaffected.
+   */
+  patternPollIntervalMs?: number
   /** Whether a completion opens a turn on an idle owner (default `wakeup`). */
   completionDelivery?: CompletionDelivery
   /**
@@ -47,9 +54,19 @@ export interface Config {
 export const Config: z<Config> = z.object({
   waitTimeoutMs: z.number().min(1).default(30_000),
   maxWaitTimeoutMs: z.number().min(1).default(600_000),
+  patternPollIntervalMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(250),
   completionDelivery: z.union(['quiet', 'wakeup'] as const).default('wakeup'),
   maxConsecutiveWakes: z.number().min(1).default(3),
 })
+
+/**
+ * Bytes a `pattern` wait may accumulate before it starts dropping the oldest
+ * ones. The model-facing budget is the caller's `max_bytes` or the producer's
+ * `outputLimitBytes`; this ceiling only keeps a caller that asks for neither
+ * from pinning an unbounded string, and the dropped count is reported in the
+ * result rather than silently discarded.
+ */
+export const MAX_WAIT_RETENTION_BYTES = 1024 * 1024
 
 /** Task state safe for model-authored programs; ownership/bookkeeping fields are omitted. */
 export interface PublicJobSnapshot {
@@ -183,9 +200,157 @@ function boundSingleText(content: readonly ContentBlock[], maxBytes: number): Co
 
 function visibleOutputLimit(ctx: Context, exec: ToolExecution): number | undefined {
   if (exec.name !== 'job_output' && exec.name !== 'job_kill') return undefined
-  const jobId = (exec.arguments as { job_id?: unknown } | null | undefined)?.job_id
+  const args = exec.arguments as { job_id?: unknown; max_bytes?: unknown } | null | undefined
+  const jobId = args?.job_id
   if (typeof jobId !== 'string' || jobId.length === 0) return undefined
-  return ctx.jobs.list(exec.agent).find(snapshot => snapshot.id === jobId)?.outputLimitBytes
+  const producerLimit = ctx.jobs.list(exec.agent).find(snapshot => snapshot.id === jobId)?.outputLimitBytes
+  // Only `job_output` accepts a call-site byte budget, and it may only tighten
+  // the producer's own cap: the smaller of the two bounds one complete result.
+  if (exec.name !== 'job_output') return producerLimit
+  const requested = args?.max_bytes
+  if (!isPositiveInteger(requested)) return producerLimit
+  return producerLimit === undefined ? requested : Math.min(producerLimit, requested)
+}
+
+/** Whether a model-supplied count is usable as a positive byte or line budget. */
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
+/** Validate one model-supplied budget, naming the offending field and value. */
+function requirePositiveInteger(value: unknown, field: string): number {
+  if (!isPositiveInteger(value)) {
+    throw new Error(`invalid ${field}: expected a positive whole number, got ${JSON.stringify(value)}`)
+  }
+  return value
+}
+
+/**
+ * Bound already-read output to its trailing `lines`.
+ * @param text - the output read from the job.
+ * @param lines - number of trailing lines to keep.
+ * @returns the kept text and how many leading lines were dropped.
+ */
+function keepTrailingLines(text: string, lines: number): { text: string; omitted: number } {
+  if (text.length === 0) return { text, omitted: 0 }
+  // A trailing newline terminates the last line; it does not start an empty one.
+  const body = text.endsWith('\n') ? text.slice(0, -1) : text
+  const all = body.split('\n')
+  if (all.length <= lines) return { text, omitted: 0 }
+  return { text: all.slice(all.length - lines).join('\n'), omitted: all.length - lines }
+}
+
+/** The exact number of bytes a retainer dropped, or 0 when it dropped none. */
+function omittedBytes(omitted: Omitted): number {
+  return omitted.kind === 'exact' ? omitted.count : 0
+}
+
+/** One output read, plus the bytes a pattern wait dropped from its own retention window. */
+interface JobOutputRead {
+  text: string
+  snapshot: JobSnapshot
+  /** Bytes the wait's retention bound dropped before this text; 0 when none were. */
+  waitOmittedBytes: number
+}
+
+/**
+ * Wait for `pattern` while reading the job incrementally: each poll reads the
+ * delta since the previous read, tests the pattern against the output read so
+ * far, and stops at a match, at a terminal status, at the deadline, or on
+ * caller cancellation. Every delta read is retained, so a match returns the
+ * output consumed on the way to it rather than losing it.
+ *
+ * This stays the single consumer of the job's output cursor: the loop is one
+ * `job_output` call reading repeatedly, exactly as a single read after a wait
+ * did. Testing uses a carried suffix of the previous reads so a match split
+ * across two deltas is still found.
+ * @param ctx - context carrying the job registry.
+ * @param id - the job to read.
+ * @param exec - the calling tool execution (owner fence, aborted signal).
+ * @param pattern - literal text that ends the wait.
+ * @param timeoutMs - total wait budget across every poll.
+ * @param pollMs - cadence between reads.
+ * @param retentionBytes - bytes the accumulated output may hold before its oldest are dropped.
+ * @returns the accumulated output, its final job state, and any dropped byte count.
+ */
+async function waitForPattern(
+  ctx: Context,
+  id: JobId,
+  exec: ToolExecution,
+  pattern: string,
+  timeoutMs: number,
+  pollMs: number,
+  retentionBytes: number,
+): Promise<JobOutputRead> {
+  const retainer = new TextRetainer({ kind: 'tail', maxBytes: retentionBytes })
+  // A match may start in the previous read's last `pattern.length - 1` bytes.
+  const carryLength = pattern.length - 1
+  let probe = ''
+  let snapshot = ctx.jobs.get(id, exec.agent)
+  const deadlineAt = Date.now() + timeoutMs
+  for (;;) {
+    const read = ctx.jobs.read(id, exec.agent)
+    snapshot = read.snapshot
+    if (read.text.length > 0) {
+      retainer.push(read.text)
+      probe += read.text
+      if (probe.includes(pattern)) break
+      probe = carryLength === 0 ? '' : probe.slice(-carryLength)
+    }
+    if (snapshot.status !== 'running' && snapshot.status !== 'stopping') break
+    const remaining = deadlineAt - Date.now()
+    if (remaining <= 0) break
+    await ctx.jobs.wait(id, Math.min(pollMs, remaining), exec.agent, exec.signal)
+  }
+  const retained = retainer.finish()
+  return {
+    text: retained.text,
+    snapshot,
+    waitOmittedBytes: omittedBytes(retained.omittedBytes),
+  }
+}
+
+/**
+ * Block until the job settles or the deadline expires, then read the delta once.
+ * @param ctx - context carrying the job registry.
+ * @param id - the job to read.
+ * @param exec - the calling tool execution (owner fence, aborted signal).
+ * @param timeoutMs - total wait budget.
+ * @returns the output read after the wait.
+ */
+async function waitAndRead(
+  ctx: Context,
+  id: JobId,
+  exec: ToolExecution,
+  timeoutMs: number,
+): Promise<JobOutputRead> {
+  await ctx.jobs.wait(id, timeoutMs, exec.agent, exec.signal)
+  return { ...ctx.jobs.read(id, exec.agent), waitOmittedBytes: 0 }
+}
+
+/**
+ * Render one read for the model: the caller's line budget keeps the output
+ * tail, and each bound that dropped content states how much at the head of the
+ * text so nothing is lost without a record.
+ * @param read - the output read, including any bytes a pattern wait dropped.
+ * @param tailLines - trailing lines to keep, or undefined to keep them all.
+ * @returns the model-facing output text.
+ */
+function boundRead(read: JobOutputRead, tailLines: number | undefined): string {
+  const markers: string[] = []
+  if (read.waitOmittedBytes > 0) {
+    markers.push(`[earlier output omitted: ${read.waitOmittedBytes} bytes]`)
+  }
+  let text = read.text
+  if (tailLines !== undefined) {
+    const kept = keepTrailingLines(text, tailLines)
+    if (kept.omitted > 0) {
+      markers.push(`[earlier output omitted: ${kept.omitted} ${kept.omitted === 1 ? 'line' : 'lines'}]`)
+    }
+    text = kept.text
+  }
+  if (text.length > 0) markers.push(text)
+  return markers.join('\n')
 }
 
 /** Validate the non-empty constraint that ParameterSchemaSpec cannot express. */
@@ -204,6 +369,7 @@ function presentTaskCall(title: string, kind: 'read' | 'execute', rawInput?: str
 export function apply(ctx: Context, config: Config): void {
   const waitDefault = config.waitTimeoutMs ?? 30_000
   const waitCap = config.maxWaitTimeoutMs ?? 600_000
+  const pollInterval = config.patternPollIntervalMs ?? 250
   const delivery = config.completionDelivery ?? 'wakeup'
   const wakeBudget = config.maxConsecutiveWakes ?? 3
 
@@ -213,6 +379,11 @@ export function apply(ctx: Context, config: Config): void {
   const spentWakes = new WeakMap<Agent, number>()
   if (waitDefault > waitCap) {
     throw new Error(`tool-jobs: waitTimeoutMs (${waitDefault}) exceeds maxWaitTimeoutMs (${waitCap})`)
+  }
+  // The cadence is a delay the wait loop hands to `ctx.jobs.wait`, which rejects
+  // a non-positive or fractional timeout.
+  if (!Number.isSafeInteger(pollInterval) || pollInterval < 1) {
+    throw new Error(`tool-jobs: patternPollIntervalMs (${pollInterval}) must be a positive whole number of milliseconds`)
   }
   // A budget is a count of turns. `Infinity` would leave the runaway chain this
   // field exists to bound unbounded, and a fraction never names a turn at all.
@@ -262,7 +433,7 @@ export function apply(ctx: Context, config: Config): void {
   ctx.systemPrompt.section({
     name: 'tool:jobs',
     order: ctx.systemPrompt.getSectionOrder('TOOL_JOBS'),
-    text: 'Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job\'s work. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering.',
+    text: 'Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job\'s work. When you are blocked on a specific line a job will print, wait for it with job_output(wait: true, pattern: "...") instead of sleeping and re-reading. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering.',
   })
 
   // Use the exact lifecycle owner; reusable ids could resolve to a replacement.
@@ -302,13 +473,17 @@ export function apply(ctx: Context, config: Config): void {
     name: 'job_output',
     description: 'Read a background job. Stream jobs return only output since the previous read; '
       + 'final-output jobs return their result after settlement. Every response ends with '
-      + '`[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap.',
+      + '`[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap '
+      + 'and returns early once `pattern` appears in the output. `tail_lines` and `max_bytes` bound what is returned.',
     // A timed-out wait returns job state rather than a TOOL_TIMEOUT error, so
     // this tool owns its deadline instead of using ToolDefinition.timeoutMs.
     parameters: {
       job_id: { type: 'string', required: true, description: 'Job id returned by the tool that started the background work.' },
-      wait: { type: 'boolean', description: 'Block until the job reaches a terminal status or the timeout expires. A timed-out wait returns [status: running] and leaves the job alive.' },
+      wait: { type: 'boolean', description: 'Block until the job reaches a terminal status, the timeout expires, or a supplied `pattern` appears. A timed-out wait returns [status: running] and leaves the job alive.' },
       timeout_ms: { type: 'number', description: 'Max wait in milliseconds (only meaningful with wait: true). Defaults to the configured wait timeout; capped by the configured maximum.' },
+      pattern: { type: 'string', description: 'Literal text to wait for (only meaningful with wait: true). The wait ends at the first read whose output contains it — before the job itself ends — and returns the output read so far, including that text.' },
+      tail_lines: { type: 'number', description: 'Return only the last N lines of the output. Earlier lines were already read and are not returned by a later call.' },
+      max_bytes: { type: 'number', description: 'Cap on the complete returned result in UTF-8 bytes, including the [status: ...] line. The tighter of this and the job\'s own output cap applies.' },
     },
     finalizeContent: finalizeTaskContent,
     output: {
@@ -328,12 +503,36 @@ export function apply(ctx: Context, config: Config): void {
     },
     async execute(args, exec) {
       const id = validateJobId(args.job_id)
+      const pattern = args.pattern
+      if (pattern !== undefined && (typeof pattern !== 'string' || pattern.length === 0)) {
+        throw new Error(`invalid pattern: expected a non-empty string, got ${JSON.stringify(pattern)}`)
+      }
+      if (pattern !== undefined && args.wait !== true) {
+        throw new Error('invalid pattern: waiting for a pattern requires wait: true')
+      }
+      const tailLines = args.tail_lines === undefined ? undefined : requirePositiveInteger(args.tail_lines, 'tail_lines')
+      // Validated here for the caller; `max_bytes` bound the result through
+      // `visibleOutputLimit` before this body ran.
+      if (args.max_bytes !== undefined) requirePositiveInteger(args.max_bytes, 'max_bytes')
+      let read: JobOutputRead
       if (args.wait === true) {
         const timeout = Math.min(args.timeout_ms ?? waitDefault, waitCap)
-        await ctx.jobs.wait(id, timeout, exec.agent, exec.signal)
+        read = pattern === undefined
+          ? await waitAndRead(ctx, id, exec, timeout)
+          : await waitForPattern(
+            ctx,
+            id,
+            exec,
+            pattern,
+            timeout,
+            pollInterval,
+            // Retaining more than this call could deliver would only cost memory.
+            visibleOutputLimit(ctx, exec) ?? MAX_WAIT_RETENTION_BYTES,
+          )
+      } else {
+        read = { ...ctx.jobs.read(id, exec.agent), waitOmittedBytes: 0 }
       }
-      const read = ctx.jobs.read(id, exec.agent)
-      return { text: read.text, job: publicJob(read.snapshot) }
+      return { text: boundRead(read, tailLines), job: publicJob(read.snapshot) }
     },
     presentCall: args => presentTaskCall(`Read output from background job ${args.job_id}`, 'read', args.job_id),
   }))
