@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-15-session-query-reconcile-skips-unindexable-logs.md
-2026-09-15-session-query-reconcile-skips-unindexable-logs.md: 7aa0ce2fa24a6ceb142bc448681b329c8cebbe12
-2026-09-15-session-query-reconcile-skips-unindexable-logs.zh.md: 821d233ba010deb4c0b2d34a23cf9736ee1adb42
+2026-09-15-session-query-reconcile-skips-unindexable-logs.md: cec44476f0a02bca02064fe2d49c43a80dbf6bbc
+2026-09-15-session-query-reconcile-skips-unindexable-logs.zh.md: 4bd7ecf07a39f4a669305d2bf32beba03ef81202

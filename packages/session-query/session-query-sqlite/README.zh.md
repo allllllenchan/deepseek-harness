@@ -70,7 +70,7 @@ kind: "package-reference"
 
 带类型的 `SessionQueryError` 失败携带稳定代码：搜索配置为关闭时 `SESSION_QUERY_SEARCH_DISABLED`；索引无法打开或对账时 `SESSION_QUERY_INDEX_FAILED`；搜索目标不存在时 `SESSION_QUERY_SESSION_NOT_FOUND`；语料库在分页之间变化时 `SESSION_QUERY_STALE_CURSOR`——请重试完整的搜索调用；游标不属于该请求时 `SESSION_QUERY_INVALID_CURSOR`。取消在同步 SQLite 调用之间被尊重；已在 JavaScript 线程上执行的语句无法被中断。
 
-读取或校验失败的持久化日志会被跳过，直到它的字节发生变化：它不出现在全文搜索结果里，`listSessions` 仍从持久化 header 列出它，修复后的日志（新 revision）会在之后的尝试中入索引。被拒绝的那个 revision 不会被再次读取，因此带不可读历史的语料库不必在每次搜索时重复付出代价，而每一轮对账只用一行告警报告被跳过的日志。配置为 `openAt: startup` 时，激活只打开句柄、并把一次完整对账排到串行队列尾部：进程启动因此不被阻塞，回填期间到达的搜索排在其后，对账失败只记日志、不致命，下一次搜索照常对账。
+读取或校验失败的持久化日志会被跳过，直到它的字节发生变化：它不出现在全文搜索结果里，`listSessions` 仍从持久化 header 列出它，修复后的日志（新 revision）会在之后的尝试中入索引。被拒绝的那个 revision 不会被再次读取，因此带不可读历史的语料库不必在每次搜索时重复付出代价，而每一轮对账只用一行告警报告被跳过的日志。配置为 `openAt: startup` 时，激活只打开句柄、并把一次完整对账排到串行队列尾部：进程启动因此不被阻塞，回填期间到达的搜索排在其后，对账失败只记日志、不致命，下一次搜索照常对账。语料稳定性只对**没有 live 属主**的会话判定：live 会话的持久化产物在其属主持续追加时本来就会变，把它算进去会让整轮 pass 自我否决。
 
 -----
 

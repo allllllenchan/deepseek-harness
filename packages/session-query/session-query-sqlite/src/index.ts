@@ -580,7 +580,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           const afterSnapshots = await persistence.list(listOptions)
           assertNotAborted(signal)
           const after = materializePersistenceSnapshots(afterSnapshots)
-          if (!samePersistenceSnapshots(persisted, after)) continue
+          if (!samePersistenceSnapshots(persisted, after, initiallyLive)) continue
           if (this._persistenceBinding !== persistenceBinding) continue
         } catch (error: unknown) {
           if (isAbort(error) || signal?.aborted) {
@@ -960,18 +960,35 @@ function materializePersistenceSnapshots(
   return result
 }
 
+/**
+ * Compare two corpus snapshots for the stability one reconcile requires.
+ *
+ * Sessions with a live owner are excluded: this pass never reads them, their
+ * membership is checked separately against the live set, and their persisted
+ * artifacts change by design while the owner keeps appending. A full-corpus
+ * pass lasts minutes, so counting them would make the pass reject itself
+ * whenever any session in the deployment is active.
+ * @param before - snapshot materialized before the corpus reads.
+ * @param after - snapshot materialized after them.
+ * @param live - sessions with a live owner during this attempt.
+ * @returns whether every non-live entry kept its revision and header.
+ */
 function samePersistenceSnapshots(
   before: ReadonlyMap<SessionId, ObservedPersistedSession>,
   after: ReadonlyMap<SessionId, ObservedPersistedSession>,
+  live: ReadonlySet<SessionId>,
 ): boolean {
-  if (before.size !== after.size) return false
   for (const [id, first] of before) {
+    if (live.has(id)) continue
     const second = after.get(id)
     if (
       second === undefined
       || first.revision !== second.revision
       || !sameHeader(first.header, second.header)
     ) return false
+  }
+  for (const id of after.keys()) {
+    if (!live.has(id) && !before.has(id)) return false
   }
   return true
 }

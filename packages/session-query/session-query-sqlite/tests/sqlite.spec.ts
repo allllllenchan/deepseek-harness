@@ -908,6 +908,33 @@ describe('SQLite reconciliation and source lifecycle', () => {
     await engine.dispose()
   })
 
+  it('reconciles while a live session keeps moving its own persisted revision', async () => {
+    const moving = header('live-mover', 1)
+    const durable = header('durable', 2)
+    TestPersistence.reset([
+      { meta: moving, events: messageEvents('live needle') },
+      { meta: durable, events: messageEvents('durable needle') },
+    ])
+    const ctx = await liveContext({ path: ':memory:' })
+    const live = ctx.sessions.prepare(moving.id, {
+      seed: messageEvents('live seed'),
+      meta: { createdAt: moving.createdAt },
+    })
+    ctx.sessions.enter(live)
+    ctx.sessions.announce(live)
+    const persistence = await ctx.plugin(TestPersistence)
+    // The live owner appends throughout the pass, so this session's persisted
+    // revision moves between the before/after snapshots. Counting it as corpus
+    // movement makes every long pass reject itself; the live path already
+    // shadows it, so its movement must not invalidate the observation.
+    TestPersistence.listEffect = () => {
+      TestPersistence.revisions.set(moving.id, ++TestPersistence.nextRevision)
+    }
+    await expect(ctx.sessionQuery.searchSessions({ query: 'durable' }))
+      .resolves.toMatchObject({ items: [{ header: durable, live: false, persisted: true }] })
+    await persistence.dispose()
+  })
+
   it('does not load a persisted log while the same session is live', async () => {
     const shared = header('checkpointed-live', 10)
     TestPersistence.reset([{ meta: shared, events: messageEvents('persisted needle') }])

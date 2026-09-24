@@ -15,7 +15,7 @@ Status: implemented
 `SqliteSessionQueryEngine` 内两处有界修改：
 
 - **不可索引的日志按 revision 跳过。** 单个持久会话的冷读、header 兼容检查与观测被包进 try；非中止的失败把 `(sessionId, revision, reason)` 记进引擎进程内的不可索引表，该会话不入索引。中止仍然传播，取消保持不写索引的性质。之后的 reconcile 在该产物保持同一 revision 时跳过读取——同样的字节不可能得出不同判定，而带不可读历史的语料库否则会在**每次搜索**上重复付出这些失败读取。修复或追加过的日志带新 revision，会被重读，并清掉自己那条记录。
-- **`openAt: 'startup'` 把一次完整 reconcile 排到串行队列尾部。** 激活只打开句柄（那才是就绪边界），把全语料回填排进 `_serialized` 而不在激活里等它：进程启动不再为一次全语料读取买单，而回填期间到达的搜索会排在这次 reconcile 之后，而不是在自己的时限内自行建索引。reconcile 失败只记日志、不致命；每次搜索仍照旧 reconcile——启动那次是主动快路径，不是新的失败点。
+- **`openAt: 'startup'` 把一次完整 reconcile 排到串行队列尾部。** 激活只打开句柄（那才是就绪边界），把全语料回填排进 `_serialized` 而不在激活里等它：进程启动不再为一次全语料读取买单，而回填期间到达的搜索会排在这次 reconcile 之后，而不是在自己的时限内自行建索引。reconcile 失败只记日志、不致命；每次搜索仍照旧 reconcile——启动那次是主动快路径，不是新的失败点。稳定性比较**排除有 live 属主的会话**：它们在这里从不被读取、其成员变化另有对照检查，而它们的持久化产物在属主持续追加时本来就会变——把它们算进去会让**任何有活跃会话的部署**里每一轮完整 pass 都自我否决，这也正是"在激活里 await 这次 pass"看起来像卡死的原因。
 
 被跳过的日志以**每轮 reconcile 一行告警**报告（计数、至多三个 id、第一条原因）：语料里有几百个不可读日志时，启动付出一行、之后保持安静。
 
@@ -37,3 +37,4 @@ Status: implemented
 
 - `tests/sqlite.spec.ts`：按会话的粘性读故障让损坏会话不入索引、不出现在全文结果里，健康语料保持可搜；被拒的 revision 只读一次，之后的搜索不再读它；清除故障并提升 revision 后，下次 reconcile 重新索引。
 - `tests/sqlite.spec.ts`：`openAt: 'startup'` 挂载引擎之后再附加持久化层，第一次搜索仍能索引持久语料；而在挂载前就附加持久化层时，同一次搜索复用已提交的行，日志恰好只被读一次。
+- `tests/sqlite.spec.ts`：一个 live 会话在每次语料列举时都移动自己的持久化 revision，不会否决这次观测；把 live 排除从稳定性比较里去掉后，这条用例会以生产上那个 `session-search persistence observation did not stabilize after one retry` 失败。
