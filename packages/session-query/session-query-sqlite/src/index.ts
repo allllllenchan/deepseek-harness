@@ -235,6 +235,12 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private _globalGeneration = 0
   private _localGeneration = 0
   private _tail: Promise<void> = Promise.resolve()
+  /**
+   * Artifacts whose last read attempt failed, by revision. Unchanged bytes
+   * cannot produce a different verdict, so later reconciles skip the read; a
+   * repaired or appended log carries a new revision and is attempted again.
+   */
+  private readonly _unindexable = new Map<SessionId, { revision: SessionPersistenceRevision; reason: string }>()
   private _closed = false
   private _closePromise: Promise<void> | undefined
   private readonly _optionalPersistenceFiber: Fiber
@@ -261,25 +267,31 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   }
 
   /**
-   * Open eagerly only when activation owns the configured readiness boundary,
-   * committing one full reconcile so searches never starve behind a cold
-   * index. A startup reconcile failure is logged, not fatal: each search
-   * re-runs reconcile.
+   * Open eagerly only when activation owns the configured readiness boundary.
+   *
+   * `openAt: startup` also commits one full reconcile, but on the serialized
+   * tail instead of inside activation: opening the handle is the readiness
+   * boundary, while a corpus backfill must not hold up process boot. A search
+   * arriving mid-backfill queues behind it rather than indexing inside its own
+   * deadline, so the index is warm for the first call either way. A reconcile
+   * failure is logged, not fatal: each search reconciles as usual.
    */
   protected async [Service.init](): Promise<void> {
-    if (this.config.openAt === 'startup') {
-      await this._ensureReady(undefined)
-      // Opening the handle is not enough to serve searches: each search
-      // reconciles inside its own deadline, so a large cold corpus starves
-      // every early search. Commit one full reconcile at boot.
+    if (this.config.openAt !== 'startup') return
+    await this._ensureReady(undefined)
+    this._serialized(undefined, async () => {
+      const started = Date.now()
       try {
         await this._reconcile(undefined)
-        console.log('[session-query-sqlite] startup reconcile committed')
+        console.log('[session-query-sqlite] startup reconcile committed in'
+          + ` ${((Date.now() - started) / 1000).toFixed(1)}s`)
       } catch (error: unknown) {
         console.warn('[session-query-sqlite] startup reconcile failed; the next search retries:'
-          + ` ${error instanceof Error ? error.message : String(error)}`)
+          + ` ${errorMessage(error)}`)
       }
-    }
+    }).catch(() => {
+      // A handle disposed while the backfill was queued drops it; searches reconcile on demand.
+    })
   }
 
   override async searchSessions(
@@ -432,7 +444,13 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     ).all() as unknown as IndexedLiveRow[]
     const persistedById = new Map(persistedRows.map(row => [row.id as SessionId, row]))
     const liveById = new Map(liveRows.map(row => [row.id as SessionId, row]))
-    const observation = await this._observeStable(persistedById, signal)
+    const skipped = new Map<SessionId, string>()
+    const observation = await this._observeStable(persistedById, signal, skipped)
+    if (skipped.size > 0) {
+      const sample = [...skipped.keys()].slice(0, 3).join(', ')
+      console.warn(`[session-query-sqlite] skipping ${skipped.size} unreadable session log(s)`
+        + ` (e.g. ${sample}): ${skipped.values().next().value ?? ''}`)
+    }
     assertNotAborted(signal)
     const persistentChanges = observation.persistenceBinding.service === undefined
       ? []
@@ -512,6 +530,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private async _observeStable(
     indexed: ReadonlyMap<SessionId, IndexedPersistedRow>,
     signal: AbortSignal | undefined,
+    skipped: Map<SessionId, string>,
   ): Promise<Observation> {
     for (let attempt = 0; attempt < STABLE_OBSERVATION_ATTEMPTS; attempt += 1) {
       assertNotAborted(signal)
@@ -536,19 +555,25 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
             // live-preferred.
             if (initiallyLive.has(entry.header.id) || this.ctx.sessions.get(entry.header.id) !== undefined) continue
             assertNotAborted(signal)
+            // A log refused at this revision is not read again until its bytes
+            // change: the verdict cannot differ, and a corpus carrying
+            // unreadable history would otherwise pay for it on every search.
+            if (canReuseIndexed && this._unindexable.get(entry.header.id)?.revision === entry.revision) continue
             // A read or header failure for one session must not abort the
-            // whole observation: the log is skipped for this attempt (the
-            // session stays unindexed, repairs are picked up on a later
-            // attempt), while aborts keep propagating.
+            // whole observation: the log is skipped (the session stays
+            // unindexed, repairs are picked up on a later attempt), while
+            // aborts keep propagating.
             try {
               const loaded = await readColdSessionLog(persistence, entry.header.id, signal)
               assertNotAborted(signal)
               assertSessionHeadersCompatible(entry.header, loaded.header)
               entry.loaded = observeSession(loaded.header, loaded.inheritedEventCount, loaded.events)
+              this._unindexable.delete(entry.header.id)
             } catch (error: unknown) {
               if (isAbort(error) || signal?.aborted) throw error
-              console.warn(`[session-query-sqlite] skipping unindexable session log ${entry.header.id}:`
-                + ` ${error instanceof Error ? error.message : String(error)}`)
+              const reason = errorMessage(error)
+              this._unindexable.set(entry.header.id, { revision: entry.revision, reason })
+              skipped.set(entry.header.id, reason)
             }
           }
           assertNotAborted(signal)

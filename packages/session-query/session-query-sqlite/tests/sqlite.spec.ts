@@ -854,6 +854,9 @@ describe('SQLite reconciliation and source lifecycle', () => {
     await expect(ctx.sessionQuery.searchSessions({ query: 'healthy' }))
       .resolves.toMatchObject({ items: [{ header: healthy, live: false, persisted: true }] })
     await expect(ctx.sessionQuery.searchSessions({ query: 'corrupt' })).resolves.toEqual({ items: [] })
+    // The refused revision is not read again: a corpus carrying unreadable
+    // history must not repay that cost on every search.
+    expect(TestPersistence.reads.get(corrupt.id)).toBe(1)
     // The corrupt log stays discoverable at the header level: listSessions
     // reads persistence directly, not the index.
     await expect(ctx.sessionQuery.listSessions()).resolves.toEqual([
@@ -862,7 +865,7 @@ describe('SQLite reconciliation and source lifecycle', () => {
     ])
 
     // Repairing the log (clearing the sticky fault) makes the next reconcile
-    // index it: skipping is per-attempt, not a poisoned permanent exclusion.
+    // index it: skipping is per revision, not a poisoned permanent exclusion.
     TestPersistence.readFailures.delete(corrupt.id)
     TestPersistence.revisions.set(corrupt.id, ++TestPersistence.nextRevision)
     await expect(ctx.sessionQuery.searchSessions({ query: 'corrupt' }))
