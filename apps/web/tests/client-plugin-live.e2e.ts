@@ -50,9 +50,10 @@ it('places dynamic Session menu rows by order among the shipped ones and removes
     const menu = page.getByRole('menu')
     await menu.waitFor()
     expect(await menu.getByRole('menuitem').allTextContents()).toEqual([
-      'Pin session', 'Rename', 'Fork session', 'Archive session', 'Export session', 'Copy session ID',
+      'Pin session', 'Rename', 'Fork session', 'Archive session', 'Copy session ID', 'Export session', 'Copy session ID',
     ])
-    expect(await menu.getByRole('separator').count()).toBe(1)
+    // One hairline opens the shipped id-copy group, one the fixture group.
+    expect(await menu.getByRole('separator').count()).toBe(2)
     await compareOrRefreshGolden(
       SESSION_ACTION_EXPECTED,
       await captureStableAria(page, '[role="menu"]', scaffold.workspaceCwd),
@@ -75,9 +76,10 @@ it('places dynamic Session menu rows by order among the shipped ones and removes
     await trigger.click()
     await menu.waitFor()
     expect(await menu.getByRole('menuitem').allTextContents()).toEqual([
-      'Pin session', 'Rename', 'Fork session', 'Archive session',
+      'Pin session', 'Rename', 'Fork session', 'Archive session', 'Copy session ID',
     ])
-    expect(await menu.getByRole('separator').count()).toBe(0)
+    // The shipped id-copy row keeps its hairline after the fixture leaves.
+    expect(await menu.getByRole('separator').count()).toBe(1)
     expect(console.pageErrors).toEqual([])
     await assertFixtureInventory(EXPECTED, [
       'bootstrap-rebuild.expected.md', 'enabled.expected.md', 'recovered.expected.md',

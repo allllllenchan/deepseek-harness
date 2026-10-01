@@ -89,10 +89,10 @@ window.__ModuleLoader__.load({
           )
         })
         ctx.slots.inject('sidebar.workspaces.session.menu.item', function* () {
-          // The shipped rows end at archive (400); these follow as one group,
-          // opened by the export row's hairline.
-          yield registerSessionAction('fixture.export-session', 500, 'exportSession', true)
-          yield registerSessionAction('fixture.copy-session-id', 600, 'copySessionId', false)
+          // The shipped rows end at copy-session-id (500); these follow as one
+          // group, opened by the export row's hairline.
+          yield registerSessionAction('fixture.export-session', 600, 'exportSession', true)
+          yield registerSessionAction('fixture.copy-session-id', 700, 'copySessionId', false)
         })
         ctx.effect(() => {
           const ping = () => { counters.liveHits = String(Number(counters.liveHits ?? 0) + 1) }

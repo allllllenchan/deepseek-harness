@@ -143,11 +143,11 @@ export const inject = ['slots', 'locale']
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'acme-session-actions: dictionaries')
 
-  // Order 500 places the row after the shipped Archive (400); `separatorBefore` opens the plugin group.
+  // Order 600 places the row after the shipped id-copy row (500); `separatorBefore` opens the plugin group.
   ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
     name: 'sidebar.workspaces.session.menu.item',
     id: 'acme.export-session',
-    order: 500,
+    order: 600,
     locale: NS,
     inject: (): ExportRowInjected => ({ exportSession }),
   }, ExportRow))

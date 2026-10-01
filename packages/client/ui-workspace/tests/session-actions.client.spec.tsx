@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * The shipped Session row actions rendered directly with hand-built props:
- * the pin, rename, fork, and archive menu rows, the archive and pin hover
+ * the pin, rename, fork, copy-id, and archive menu rows, the archive and pin hover
  * buttons, and the two `shell.overlay` surfaces they raise (rename dialog,
  * row notice). Every action reads its own injected hooks and calls its own
  * injected callbacks; what those callbacks do is apply.client.spec's
@@ -27,6 +27,7 @@ import {
   ArchiveSessionMenuItem, ArchiveSessionRowButton, SessionArchiveConfirmDialog,
 } from '../src/client/session-actions/ArchiveSession.tsx'
 import { ForkSessionMenuItem } from '../src/client/session-actions/ForkSession.tsx'
+import { CopySessionIdMenuItem } from '../src/client/session-actions/CopySessionId.tsx'
 import { PinSessionMenuItem, PinSessionRowButton } from '../src/client/session-actions/PinSession.tsx'
 import { RenameSessionMenuItem, SessionRenameDialog } from '../src/client/session-actions/RenameSession.tsx'
 import { RowActionToast } from '../src/client/session-actions/RowActionToast.tsx'
@@ -225,6 +226,20 @@ describe('fork and rename rows', () => {
     expect(requestSessionRename).toHaveBeenCalledWith(sid('one'), 'Session title')
     expect(setMenuOpen).toHaveBeenCalledWith(false)
     expect(callOrder(setMenuOpen)).toBeLessThan(callOrder(requestSessionRename))
+  })
+
+  it('copy id opens its group with a hairline, closes the menu, then writes the id', () => {
+    const { state, setMenuOpen } = openMenu()
+    const writeText = vi.fn()
+    // jsdom ships no clipboard; the component reaches only writeText.
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(<CopySessionIdMenuItem {...menuRow(state)} />)
+    fireEvent.click(screen.getByRole('menuitem', { name: '复制会话 ID' }))
+    expect(writeText).toHaveBeenCalledWith(sid('one'))
+    expect(setMenuOpen).toHaveBeenCalledWith(false)
+    expect(callOrder(setMenuOpen)).toBeLessThan(callOrder(writeText))
+    // The row carries the hairline that opens its group after Archive.
+    expect(screen.getByRole('separator')).toBeTruthy()
   })
 })
 

@@ -26,7 +26,7 @@
  * row of a Session's "..." menu is an entry of
  * `sidebar.workspaces.session.menu.item`, and every hover button at the row's
  * end is an entry of `sidebar.workspaces.session.row.action`. The shipped
- * actions — pin, rename, fork, archive — are ordinary entries this package
+ * actions — pin, rename, fork, archive, copy id — are ordinary entries this package
  * registers from `apply`, each carrying its own behavior in its own inject
  * face and reading its own Host state through hooks that face injects, so a
  * client plugin's action lands beside them by `order` and needs nothing from
@@ -102,28 +102,29 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /**
      * The rows of one Session's "..." menu, in ascending `order`. ui-workspace
      * registers the shipped rows here — `pin` (100), `rename` (200), `fork`
-     * (300), `archive` (400) — so a plugin row is placed by its own `order`
-     * among them. Use a package-namespaced `id`; reusing a shipped id at
-     * another `priority` shadows that row. Each entry renders one
-     * `role="menuitem"` `<button>` (the shipped rows use ui-primitives'
-     * `MenuItemButton`, which adds the host styling and `separatorBefore`),
-     * decides its own visibility from its own state, and dismisses the menu
-     * through the injected `useMenuOpenState` hook after acting; the list's
-     * keyboard walk and focus return read the DOM, so any such button joins
-     * them. Labels come from the contributing package's locale namespace.
+     * (300), `archive` (400), `copy-session-id` (500) — so a plugin row is
+     * placed by its own `order` among them. Use a package-namespaced `id`;
+     * reusing a shipped id at another `priority` shadows that row. Each entry
+     * renders one `role="menuitem"` `<button>` (the shipped rows use
+     * ui-primitives' `MenuItemButton`, which adds the host styling and
+     * `separatorBefore`), decides its own visibility from its own state, and
+     * dismisses the menu through the injected `useMenuOpenState` hook after
+     * acting; the list's keyboard walk and focus return read the DOM, so any
+     * such button joins them. Labels come from the contributing package's
+     * locale namespace.
      * @example
      * return {
      *   inject: ['slots'],
      *   apply(ctx) {
-     *     const copyLabel = 'Copy Session ID' // Localize in the contributing package.
+     *     const exportLabel = 'Export session' // Localize in the contributing package.
      *     ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register(
-     *       { name: 'sidebar.workspaces.session.menu.item', id: 'copy-session-id', order: 500 },
+     *       { name: 'sidebar.workspaces.session.menu.item', id: 'acme.export-session', order: 600 },
      *       ({ sessionId, useMenuOpenState }) => {
      *         const [, setMenuOpen] = useMenuOpenState()
      *         return React.createElement(
      *           'button',
-     *           { type: 'button', role: 'menuitem', onClick: () => { setMenuOpen(false); void navigator.clipboard.writeText(sessionId) } },
-     *           copyLabel,
+     *           { type: 'button', role: 'menuitem', onClick: () => { setMenuOpen(false); exportSession(sessionId) } },
+     *           exportLabel,
      *         )
      *       },
      *     ))
