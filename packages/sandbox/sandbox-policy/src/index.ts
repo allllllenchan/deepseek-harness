@@ -114,6 +114,28 @@ declare module '@deepseek-ai/cordis' {
  * runner choice is NOT here (it is the `ctx.sandbox` provider's config), nor
  * is any per-family knob: this is the one shared policy home.
  */
+/** One workspace entry's accepted shape; fields stay optional so absence means "fall through". */
+const workspaceSandboxEntrySchema = zod.object({
+  extraWritableRoots: zod.array(zod.string()).optional(),
+  tempRoot: zod.string().optional(),
+})
+
+/** The whole `workspaceSandbox` mapping. */
+const workspaceSandboxSchema = zod.record(zod.string(), workspaceSandboxEntrySchema)
+
+/**
+ * Sandbox defaults bound to ONE workspace path — the workspace level of the
+ * single SandboxSpec model (session-level overrides are a later binding of the
+ * same fields). Every field is optional: an omitted field falls through to the
+ * deployment-level value, then the built-in default.
+ */
+export interface WorkspaceSandboxDefaults {
+  /** Writable roots for sessions in this workspace (replaces the deployment-level extras when present). */
+  extraWritableRoots?: string[]
+  /** Private-temp parent for sessions in this workspace (overrides the deployment-level value). */
+  tempRoot?: string
+}
+
 export interface Config {
   /** File-sandbox mode a session starts from (default: `read-only`). */
   mode?: SandboxMode
@@ -129,6 +151,20 @@ export interface Config {
    * warning — the widest root already covers them. Read-only ignores them.
    */
   extraWritableRoots?: string[]
+  /**
+   * Deployment-level private-temp parent (default: the platform temp dir). Must
+   * lie outside every writable root; the enforcing backend fails closed when a
+   * resolved root contains it.
+   */
+  tempRoot?: string
+  /**
+   * Per-workspace defaults, keyed by the workspace path. A session's resolved
+   * workspace root selects its entry (exact path match, case-insensitive on
+   * win32-shaped paths); an unmatched workspace uses the deployment values.
+   * This is the workspace binding of the SandboxSpec model — the same fields a
+   * session-level override will later outrank.
+   */
+  workspaceSandbox?: Record<string, WorkspaceSandboxDefaults>
 }
 
 /** Inputs that select the sandbox policy for one capability call. */
@@ -168,6 +204,12 @@ export class SandboxPolicyService extends Service {
     // stored root is always absolute regardless of how it was supplied.
     workspaceRoot: z.string(),
     extraWritableRoots: z.array(z.string()),
+    tempRoot: z.string(),
+    // Untyped on purpose: schemastery materializes an absent array as `[]`,
+    // which would erase "this entry does not configure extras" and silently
+    // drop the deployment value. The constructor validates and normalizes it
+    // through the zod schema below, which preserves absence.
+    workspaceSandbox: z.any(),
   })
 
   static inject = ['sessionProjections']
@@ -178,6 +220,10 @@ export class SandboxPolicyService extends Service {
   readonly workspaceRoot: string
   /** Configured extra writable roots (already absolute; reduced at resolve time against the live workspace root). */
   readonly extraWritableRoots: readonly string[]
+  /** Deployment-level private-temp parent, when configured. */
+  readonly tempRoot: string | undefined
+  /** Per-workspace defaults, keyed as configured (matched at resolve time). */
+  readonly workspaceSandbox: Readonly<Record<string, WorkspaceSandboxDefaults>>
   constructor(ctx: Context, config: Config) {
     super(ctx, 'sandboxPolicy')
     // schemastery (static Config) already filled `mode`; the cast records that
@@ -186,6 +232,24 @@ export class SandboxPolicyService extends Service {
     this.defaultMode = config.mode as SandboxMode
     this.workspaceRoot = resolveWorkspaceRoot(config.workspaceRoot ?? process.cwd())
     this.extraWritableRoots = (config.extraWritableRoots ?? []).map(resolveWorkspaceRoot)
+    this.tempRoot = config.tempRoot === undefined ? undefined : resolveWorkspaceRoot(config.tempRoot)
+    const parsedWorkspaceSandbox = config.workspaceSandbox === undefined
+      ? {}
+      : (() => {
+        const result = workspaceSandboxSchema.safeParse(config.workspaceSandbox)
+        if (!result.success) {
+          throw new Error(`sandbox-policy: workspaceSandbox must map workspace paths to { extraWritableRoots?, tempRoot? }: ${result.error.message}`)
+        }
+        return result.data
+      })()
+    this.workspaceSandbox = Object.fromEntries(
+      Object.entries(parsedWorkspaceSandbox).map(([path, defaults]) => [resolveWorkspaceRoot(path), {
+        ...defaults.extraWritableRoots === undefined
+          ? {}
+          : { extraWritableRoots: defaults.extraWritableRoots.map(resolveWorkspaceRoot) },
+        ...defaults.tempRoot === undefined ? {} : { tempRoot: resolveWorkspaceRoot(defaults.tempRoot) },
+      }]),
+    )
 
     ctx.sessionProjections.register({
       key: 'sandboxMode',
@@ -221,15 +285,38 @@ export class SandboxPolicyService extends Service {
   resolve(request: SandboxPolicyRequest = {}): SandboxExecutionPolicy {
     const { session } = request
     const workspaceRoot = resolveWorkspaceRoot(session?.header.cwd ?? this.workspaceRoot)
-    const extraWritableRoots = this.extraWritableRoots.length === 0
+    // Workspace binding first (the SandboxSpec workspace level), then the
+    // deployment value: an entry's field wins field-by-field, and an absent
+    // entry changes nothing.
+    const bound = this.workspaceSandboxOf(workspaceRoot)
+    const configuredExtras = bound?.extraWritableRoots ?? this.extraWritableRoots
+    const extraWritableRoots = configuredExtras.length === 0
       ? []
-      : reduceExtraRoots(workspaceRoot, this.extraWritableRoots, (message) => { this.ctx.logger.warn(message) })
+      : reduceExtraRoots(workspaceRoot, configuredExtras, (message) => { this.ctx.logger.warn(message) })
+    const tempRoot = bound?.tempRoot ?? this.tempRoot
     return {
       mode: request.mode ?? (session === undefined ? undefined : this.overrideOf(session)) ?? this.defaultMode,
       workspaceRoot,
       ...(extraWritableRoots.length === 0 ? {} : { extraWritableRoots }),
+      ...tempRoot === undefined ? {} : { tempRoot },
       ...session === undefined ? {} : { sessionId: session.id },
     }
+  }
+
+  /**
+   * The configured defaults bound to one resolved workspace root, matched by
+   * path (case-insensitive on win32-shaped paths). Lexical only — no
+   * filesystem access: the enforcing backend canonicalizes, and a workspace
+   * reached through a differently-spelled path may therefore miss its entry
+   * (the documented cost of keeping policy resolution host-free).
+   * @param workspaceRoot - the resolved workspace root.
+   * @returns the bound defaults, or `undefined` when the workspace has none.
+   */
+  private workspaceSandboxOf(workspaceRoot: string): WorkspaceSandboxDefaults | undefined {
+    for (const [key, defaults] of Object.entries(this.workspaceSandbox)) {
+      if (samePath(key, workspaceRoot)) return defaults
+    }
+    return undefined
   }
 
   /**

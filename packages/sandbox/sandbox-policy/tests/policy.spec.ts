@@ -15,7 +15,13 @@ import SandboxPolicyService, { SANDBOX_MODES, setSandboxMode } from '@deepseek-a
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt, { renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 
-async function mounted(config: { mode?: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot?: string; extraWritableRoots?: string[] } = {}) {
+async function mounted(config: {
+  mode?: 'read-only' | 'workspace-write' | 'danger-full-access'
+  workspaceRoot?: string
+  extraWritableRoots?: string[]
+  tempRoot?: string
+  workspaceSandbox?: Record<string, { extraWritableRoots?: string[]; tempRoot?: string }>
+} = {}) {
   const ctx = new Context()
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SandboxPolicyService, config)
@@ -85,6 +91,67 @@ describe('SandboxPolicyService', () => {
     // primary); only extra-vs-extra and exact duplicates reduce.
     const wider = await mounted({ mode: 'workspace-write', workspaceRoot: '/projects/current', extraWritableRoots: ['/projects'] })
     expect(wider.sandboxPolicy.resolve().extraWritableRoots).toEqual(['/projects'])
+  })
+
+  it('applies workspace-bound defaults for the matching workspace, deployment values elsewhere', async () => {
+    const ctx = await mounted({
+      mode: 'workspace-write',
+      workspaceRoot: '/fallback',
+      extraWritableRoots: ['/deploy/extra'],
+      tempRoot: '/deploy/temp',
+      workspaceSandbox: {
+        '/projects/current': { extraWritableRoots: ['/ws/extra'], tempRoot: '/ws/temp' },
+      },
+    })
+    ctx.logger.warn = () => {}
+    // Matching workspace: the entry's fields win field-by-field.
+    expect(ctx.sandboxPolicy.resolve({ session: session('sess-bound', '/projects/current') })).toEqual({
+      mode: 'workspace-write',
+      workspaceRoot: '/projects/current',
+      extraWritableRoots: ['/ws/extra'],
+      tempRoot: '/ws/temp',
+      sessionId: SessionId('sess-bound'),
+    })
+    // Unmatched workspace: deployment values apply unchanged.
+    expect(ctx.sandboxPolicy.resolve({ session: session('sess-unbound', '/projects/other') })).toEqual({
+      mode: 'workspace-write',
+      workspaceRoot: '/projects/other',
+      extraWritableRoots: ['/deploy/extra'],
+      tempRoot: '/deploy/temp',
+      sessionId: SessionId('sess-unbound'),
+    })
+  })
+
+  it('lets a workspace entry carry only the field it overrides', async () => {
+    const ctx = await mounted({
+      mode: 'workspace-write',
+      workspaceRoot: '/fallback',
+      extraWritableRoots: ['/deploy/extra'],
+      workspaceSandbox: { '/projects/current': { tempRoot: '/ws/temp' } },
+    })
+    ctx.logger.warn = () => {}
+    const policy = ctx.sandboxPolicy.resolve({ session: session('sess-partial', '/projects/current') })
+    expect(policy.tempRoot).toBe('/ws/temp')
+    expect(policy.extraWritableRoots).toEqual(['/deploy/extra'])
+  })
+
+  it('omits tempRoot from the policy when neither binding configures one', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/projects/current' })
+    expect('tempRoot' in ctx.sandboxPolicy.resolve()).toBe(false)
+  })
+
+  it('rejects a relative configured tempRoot at load and keeps an absolute one', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(SessionProjectionRegistry)
+      await expect(ctx.plugin(SandboxPolicyService, { tempRoot: 'relative/temp' }))
+        .rejects.toThrow('sandbox-policy: workspace root must be an absolute execution-world path')
+      expect(ctx.get('sandboxPolicy')).toBeUndefined()
+    } finally {
+      await ctx.fiber.dispose()
+    }
+    const ok = await mounted({ tempRoot: '/absolute/temp' })
+    expect(ok.sandboxPolicy.tempRoot).toBe('/absolute/temp')
   })
 
   it('omits extraWritableRoots entirely when none are configured', async () => {

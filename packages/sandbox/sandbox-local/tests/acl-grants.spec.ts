@@ -5,7 +5,7 @@
  * is mocked; native access checks live in sandbox-windows-acl's runner suite.
  */
 
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -201,6 +201,49 @@ describe('windows-acl write grants (LocalSandboxProvider)', () => {
     } finally {
       cleanup()
     }
+  })
+
+  it('a configured tempRoot parents the private temp capability and travels via --temp', async () => {
+    try {
+      const { sandbox, fiber } = await setup()
+      const ws = workspaceRoot()
+      const configured = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-acl-grants-scratch-')))
+      scratch.push(ws, configured)
+      const policy: SandboxPolicy = {
+        mode: 'workspace-write', workspaceRoot: ws, tempRoot: configured,
+        sessionId: SessionId('sess-temp-root'),
+      }
+      const confined = await sandbox.confine(['true'], policy)
+      const tempDir = flag(confined.argv, '--temp')
+      expect(tempDir?.startsWith(configured)).toBe(true)
+      expect(basename(tempDir ?? '')).toMatch(/^dsh-[A-Za-z0-9_-]{6}$/u)
+      // The agentless branch uses the configured root as the --temp ROOT too.
+      const agentless = await sandbox.confine(['true'], { mode: 'workspace-write', workspaceRoot: ws, tempRoot: configured })
+      expect(flag(agentless.argv, '--temp')).toBe(configured)
+      await fiber.dispose()
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('a configured tempRoot inside a writable root fails closed', async () => {
+    const { sandbox } = await setup()
+    const ws = workspaceRoot()
+    scratch.push(ws)
+    const nested = join(ws, 'temp-scratch')
+    mkdirSync(nested)
+    await expect(sandbox.confine(['true'], {
+      mode: 'workspace-write', workspaceRoot: ws, tempRoot: nested, sessionId: SessionId('sess-nested-temp'),
+    })).rejects.toThrow(/temp root must be outside the workspace/u)
+  })
+
+  it('a configured tempRoot that does not exist fails closed instead of falling back', async () => {
+    const { sandbox } = await setup()
+    const ws = workspaceRoot()
+    scratch.push(ws)
+    await expect(sandbox.confine(['true'], {
+      mode: 'workspace-write', workspaceRoot: ws, tempRoot: join(ws, 'missing-temp'), sessionId: SessionId('sess-missing-temp'),
+    })).rejects.toThrow(/configured tempRoot is not an existing directory/u)
   })
 
   it('read-only materializes no capability; upgrade creates them and downgrade leaves them reusable', async () => {

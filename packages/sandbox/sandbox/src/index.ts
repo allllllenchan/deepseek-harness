@@ -51,6 +51,15 @@ export interface SandboxExecutionPolicy {
    */
   extraWritableRoots?: readonly string[]
   /**
+   * Parent directory for the private temp area of an execution (default: the
+   * platform temp dir, `os.tmpdir()`). The enforcing backend creates its
+   * random private child beneath it and keeps that child outside EVERY
+   * writable root — a temp area inside a granted root would merge the
+   * revocable temp capability with that root's standing one. Absolute, and
+   * resolved by the backend against its own host filesystem.
+   */
+  tempRoot?: string
+  /**
    * Opaque identity of the calling session (the branded `dsh-session`
    * SessionId). Backends key per-session state off it (e.g. windows-acl gives
    * each live session/workspace pair a random private temp directory and SID,

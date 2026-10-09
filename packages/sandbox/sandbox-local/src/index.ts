@@ -22,7 +22,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -274,6 +274,8 @@ export class LocalSandboxProvider extends SandboxProvider {
    */
   private readonly workspaceGrants = new Map<string, AclWriteGrant>()
   private readonly tempCapabilities = new Map<string, AclTempCapability>()
+  /** Canonicalized configured temp roots, keyed by the configured spelling (validated once). */
+  private readonly resolvedTempRoots = new Map<string, string>()
 
   constructor(ctx: Context, config: Config) {
     super(ctx)
@@ -374,21 +376,44 @@ export class LocalSandboxProvider extends SandboxProvider {
    * @param policy - the resolved per-call policy.
    * @returns the runner invocation.
    */
+  /**
+   * The private-temp parent for one policy: the configured {@link
+   * SandboxPolicy.tempRoot} when present, else the platform temp dir. A
+   * configured root is validated once per provider lifetime (must exist and be
+   * a directory) and canonicalized, so the ACE/argv identities use one
+   * spelling; a bad root throws rather than silently falling back.
+   * @param policy - the resolved per-call policy.
+   * @returns the absolute private-temp parent.
+   */
+  private tempRootOf(policy: SandboxPolicy): string {
+    const configured = policy.tempRoot
+    if (configured === undefined) return tmpdir()
+    const cached = this.resolvedTempRoots.get(configured)
+    if (cached !== undefined) return cached
+    if (!existsSync(configured) || !statSync(configured).isDirectory()) {
+      throw new Error(`sandbox-local: configured tempRoot is not an existing directory: ${configured}`)
+    }
+    const resolved = canonicalPath(configured)
+    this.resolvedTempRoots.set(configured, resolved)
+    return resolved
+  }
+
   private windowsAclRunnerArgv(policy: SandboxPolicy): string[] {
     const sessionId = policy.sessionId
     // Every writable root travels as its own --workspace/--write-sid pair:
     // per-root deterministic SIDs keep a session confined WITHOUT a given
     // extra root unable to write it through another session's standing ACE.
     const roots = [policy.workspaceRoot, ...(policy.extraWritableRoots ?? [])]
+    const tempRoot = this.tempRootOf(policy)
     if (sessionId === undefined || policy.mode === 'read-only') {
       return [
         ...this.windowsAclRunnerInvocation(),
         ...roots.flatMap(root => ['--workspace', root]),
-        '--temp', tmpdir(),
+        '--temp', tempRoot,
         '--mode', policy.mode,
       ]
     }
-    const temp = this.materializeAclGrant(sessionId, roots)
+    const temp = this.materializeAclGrant(sessionId, roots, tempRoot)
     return [
       ...this.windowsAclRunnerInvocation(),
       ...roots.flatMap(root => ['--workspace', root]),
@@ -410,11 +435,12 @@ export class LocalSandboxProvider extends SandboxProvider {
    * grant is revoked and its directory removed before the error propagates.
    * @param sessionId - the policy's calling-session identity.
    * @param roots - the resolved writable roots (primary first, extras after).
+   * @param tempRoot - the configured (or platform) private-temp parent.
    * @returns the roots' shared private temp directory and write capability.
    */
-  private materializeAclGrant(sessionId: SessionId, roots: readonly string[]): AclTempCapability {
+  private materializeAclGrant(sessionId: SessionId, roots: readonly string[], tempRoot: string): AclTempCapability {
     for (const root of roots) {
-      assertTempRootOutsideWorkspace(root, tmpdir())
+      assertTempRootOutsideWorkspace(root, tempRoot)
     }
     for (const root of roots) {
       if (this.workspaceGrants.has(root)) continue
@@ -435,10 +461,10 @@ export class LocalSandboxProvider extends SandboxProvider {
       }
       this.workspaceGrants.set(root, grant)
     }
-    const key = JSON.stringify([String(sessionId), ...roots])
+    const key = JSON.stringify([String(sessionId), ...roots, tempRoot])
     const existing = this.tempCapabilities.get(key)
     if (existing !== undefined) return existing
-    const tempDir = mkdtempSync(join(tmpdir(), 'dsh-'))
+    const tempDir = mkdtempSync(join(tempRoot, 'dsh-'))
     const tempSid = tempWriteSid(tempDir)
     let grant: AclWriteGrant | undefined
     try {
