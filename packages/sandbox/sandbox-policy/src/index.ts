@@ -20,7 +20,7 @@
  * @module @deepseek-ai/dsh-sandbox-policy
  */
 
-import { isAbsolute } from 'node:path'
+import { isAbsolute, relative, sep } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { z as zod } from 'zod'
 import z from '@deepseek-ai/schemastery'
@@ -38,13 +38,59 @@ function resolveWorkspaceRoot(path: string): string {
   return path
 }
 
+/** Case-insensitive on win32-shaped paths, exact elsewhere — string-level only, no filesystem access. */
+function samePath(a: string, b: string): boolean {
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+}
+
+/** Whether `root` lexically contains `candidate` (or is the same path), WITHOUT touching the filesystem. */
+function lexicallyContains(root: string, candidate: string): boolean {
+  const relation = relative(root, candidate)
+  return relation === '' || (!isAbsolute(relation) && relation !== '..' && !relation.startsWith(`..${sep}`))
+}
+
+/**
+ * Reduce the configured extra roots against the workspace root and one
+ * another: drop exact duplicates and any root lexically contained by another
+ * (nesting is NOT an error — the wider root already covers it), warning once
+ * per dropped entry. Lexical only: the enforcing backends resolve real
+ * filesystem identity.
+ */
+function reduceExtraRoots(workspaceRoot: string, extras: readonly string[], warn: (message: string) => void): string[] {
+  const kept: string[] = []
+  for (const raw of extras) {
+    const extra = resolveWorkspaceRoot(raw)
+    const wider = [workspaceRoot, ...kept].find(root => lexicallyContains(root, extra) || samePath(root, extra))
+    if (wider !== undefined) {
+      warn(`sandbox-policy: extra writable root ${extra} is covered by ${wider}; dropping it (nested roots keep the widest)`)
+      continue
+    }
+    // A later extra may be WIDER than one already kept — evict the narrower.
+    const narrower = kept.findIndex(root => lexicallyContains(extra, root) || samePath(extra, root))
+    if (narrower !== -1) {
+      warn(`sandbox-policy: extra writable root ${kept[narrower]} is covered by ${extra}; dropping it (nested roots keep the widest)`)
+      kept.splice(narrower, 1)
+    }
+    kept.push(extra)
+  }
+  return kept
+}
+
 /** Render the policy without claiming which capabilities are mounted. */
 function renderPolicyContext(policy: SandboxExecutionPolicy): string {
   switch (policy.mode) {
     case 'read-only':
       return 'Current DSH file policy: read-only. Any available operation enforced by the DSH file sandbox cannot modify files in the standing mode. Do not refuse a required modification from this policy alone: try an available tool normally and follow any denial and escalation guidance it returns.'
-    case 'workspace-write':
-      return `Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: ${JSON.stringify(policy.workspaceRoot)}. Some platform temporary areas may also be writable.`
+    case 'workspace-write': {
+      // Single-root renders the historical sentence BYTE-IDENTICALLY (the
+      // runtime-context snapshot is logged and replayed byte-stable); only
+      // multi-root policies take the plural form.
+      if (policy.extraWritableRoots === undefined || policy.extraWritableRoots.length === 0) {
+        return `Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: ${JSON.stringify(policy.workspaceRoot)}. Some platform temporary areas may also be writable.`
+      }
+      const roots = JSON.stringify([policy.workspaceRoot, ...policy.extraWritableRoots])
+      return `Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspaces: ${roots}. Some platform temporary areas may also be writable.`
+    }
     case 'danger-full-access':
       return 'Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.'
     /* v8 ignore next 4 -- SandboxMode is a typed same-process closed union; this branch is only the static exhaustiveness guard. */
@@ -76,6 +122,13 @@ export interface Config {
    * `process.cwd()`). Normal agent calls use their session cwd instead.
    */
   workspaceRoot?: string
+  /**
+   * Additional absolute writable roots for `workspace-write`, appended to the
+   * (session or fallback) workspace root for EVERY resolved policy (default:
+   * none). Exact duplicates and lexically nested entries are dropped with a
+   * warning — the widest root already covers them. Read-only ignores them.
+   */
+  extraWritableRoots?: string[]
 }
 
 /** Inputs that select the sandbox policy for one capability call. */
@@ -114,6 +167,7 @@ export class SandboxPolicyService extends Service {
     // No schema default: process.cwd() is resolved in the constructor so the
     // stored root is always absolute regardless of how it was supplied.
     workspaceRoot: z.string(),
+    extraWritableRoots: z.array(z.string()),
   })
 
   static inject = ['sessionProjections']
@@ -122,6 +176,8 @@ export class SandboxPolicyService extends Service {
   readonly defaultMode: SandboxMode
   /** The absolute `workspace-write` fallback root for calls without a session cwd. */
   readonly workspaceRoot: string
+  /** Configured extra writable roots (already absolute; reduced at resolve time against the live workspace root). */
+  readonly extraWritableRoots: readonly string[]
   constructor(ctx: Context, config: Config) {
     super(ctx, 'sandboxPolicy')
     // schemastery (static Config) already filled `mode`; the cast records that
@@ -129,6 +185,7 @@ export class SandboxPolicyService extends Service {
     // the process cwd is real branching, resolved absolute either way.
     this.defaultMode = config.mode as SandboxMode
     this.workspaceRoot = resolveWorkspaceRoot(config.workspaceRoot ?? process.cwd())
+    this.extraWritableRoots = (config.extraWritableRoots ?? []).map(resolveWorkspaceRoot)
 
     ctx.sessionProjections.register({
       key: 'sandboxMode',
@@ -163,9 +220,14 @@ export class SandboxPolicyService extends Service {
    */
   resolve(request: SandboxPolicyRequest = {}): SandboxExecutionPolicy {
     const { session } = request
+    const workspaceRoot = resolveWorkspaceRoot(session?.header.cwd ?? this.workspaceRoot)
+    const extraWritableRoots = this.extraWritableRoots.length === 0
+      ? []
+      : reduceExtraRoots(workspaceRoot, this.extraWritableRoots, (message) => { this.ctx.logger.warn(message) })
     return {
       mode: request.mode ?? (session === undefined ? undefined : this.overrideOf(session)) ?? this.defaultMode,
-      workspaceRoot: resolveWorkspaceRoot(session?.header.cwd ?? this.workspaceRoot),
+      workspaceRoot,
+      ...(extraWritableRoots.length === 0 ? {} : { extraWritableRoots }),
       ...session === undefined ? {} : { sessionId: session.id },
     }
   }

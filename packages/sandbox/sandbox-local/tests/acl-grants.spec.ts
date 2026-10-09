@@ -74,7 +74,11 @@ async function setup() {
 }
 
 function workspaceRoot(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), 'dsh-acl-grants-ws-')))
+  // `realpathSync.native` — the SAME identity the provider applies via
+  // canonicalPath(). The JavaScript realpath can return a different spelling
+  // (8.3 short names on Windows), which would compare unequal to the argv the
+  // provider emits even though both name one directory.
+  return realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-acl-grants-ws-')))
 }
 
 function flag(argv: readonly string[], name: string): string | undefined {
@@ -151,6 +155,49 @@ describe('windows-acl write grants (LocalSandboxProvider)', () => {
       await fiber.dispose()
       expect(mockState.grants.every(grant => grant.disposed)).toBe(true)
       expect(existsSync(tempDir ?? '')).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('multi-root workspace-write passes one --workspace/--write-sid pair per root, each with its own standing grant', async () => {
+    try {
+      const { sandbox, fiber } = await setup()
+      const ws = workspaceRoot()
+      const task = workspaceRoot()
+      scratch.push(ws, task)
+      const policy: SandboxPolicy = {
+        mode: 'workspace-write', workspaceRoot: ws,
+        extraWritableRoots: [task],
+        sessionId: SessionId('sess-multi'),
+      }
+
+      const confined = await sandbox.confine(['pwsh', '/Command', 'x'], policy)
+      const tempDir = flag(confined.argv, '--temp')
+      const tempSid = flag(confined.argv, '--temp-write-sid')
+      expect(tempDir).toBeDefined()
+      // Single-root byte shape is preserved pairwise: all --workspace flags
+      // first, temp/mode, then all --write-sid flags, then temp-write-sid.
+      expect(confined.argv).toEqual([
+        'node', 'windows-acl-runner.js',
+        '--workspace', ws,
+        '--workspace', task,
+        '--temp', tempDir,
+        '--mode', 'workspace-write',
+        '--write-sid', WORKSPACE_SID,
+        '--write-sid', WORKSPACE_SID, // the mock derives a constant; the real one derives per-root distinct SIDs
+        '--temp-write-sid', tempSid,
+        '--',
+        'pwsh', '/Command', 'x',
+      ])
+      const standing = mockState.grants.filter(grant => grant.added.at(-1)?.standing)
+      expect(standing).toHaveLength(2)
+      expect(new Set(standing.flatMap(grant => grant.added.map(entry => entry.path)))).toEqual(new Set([ws, task]))
+
+      // Same roots again: standing grants and the temp capability are reused.
+      expect((await sandbox.confine(['pwsh', '/Command', 'x'], policy)).argv).toEqual(confined.argv)
+      expect(mockState.grants).toHaveLength(3) // two standing + one temp
+      await fiber.dispose()
     } finally {
       cleanup()
     }

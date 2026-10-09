@@ -8,10 +8,14 @@
  *
  * Stable argv contract (the seam builds it; a native-exe replacement would
  * keep the same contract):
- *   [node, runner.js, '--workspace', <dir>, '--temp', <dir>,
- *    '--mode', <read-only|workspace-write>,
- *    ['--write-sid', <S-1-4-…>,
- *     '--temp-write-sid', <S-1-4-…>], '--', <argv...>]
+ *   [node, runner.js, '--workspace', <dir>, ['--workspace', <dir>]…,
+ *    '--temp', <dir>, '--mode', <read-only|workspace-write>,
+ *    ['--write-sid', <S-1-4-…> paired by order with --workspace…]…,
+ *    ['--temp-write-sid', <S-1-4-…>], '--', <argv...>]
+ *
+ * Multiple `--workspace` flags grant multiple writable roots, each carrying
+ * its OWN per-root write SID (order-paired `--write-sid` flags); a single
+ * workspace keeps the historical single-pair shape byte-for-byte.
  *
  * Modes:
  *  - workspace-write: the workspace and temp directories carry distinct
@@ -64,20 +68,20 @@ function fail(detail: string): never {
 }
 
 interface ParsedArgs {
-  workspace: string
+  workspaces: string[]
   temp: string
   mode: 'read-only' | 'workspace-write'
-  writeSid: string | undefined
+  writeSids: string[]
   tempWriteSid: string | undefined
   command: string
   args: string[]
 }
 
 function parseArgs(raw: string[]): ParsedArgs {
-  let workspace: string | undefined
+  const workspaces: string[] = []
   let temp: string | undefined
   let mode: string | undefined
-  let writeSid: string | undefined
+  const writeSids: string[] = []
   let parsedTempWriteSid: string | undefined
   let index = 0
   for (; index < raw.length; index++) {
@@ -90,21 +94,21 @@ function parseArgs(raw: string[]): ParsedArgs {
     const value = raw[index]
     if (value === undefined) fail(`missing value after ${token}`)
     switch (token) {
-      case '--workspace': workspace = value; break
+      case '--workspace': workspaces.push(value); break
       case '--temp': temp = value; break
       case '--mode': mode = value; break
-      case '--write-sid': writeSid = value; break
+      case '--write-sid': writeSids.push(value); break
       case '--temp-write-sid': parsedTempWriteSid = value; break
       default: fail(`unknown argument: ${token}`)
     }
   }
-  if (workspace === undefined) fail('missing --workspace')
+  if (workspaces.length === 0) fail('missing --workspace')
   if (temp === undefined) fail('missing --temp')
   if (mode !== 'read-only' && mode !== 'workspace-write') fail(`unknown mode: ${String(mode)}`)
   const argv = raw.slice(index)
   const command = argv[0]
   if (command === undefined) fail('missing command after --')
-  return { workspace, temp, mode, writeSid, tempWriteSid: parsedTempWriteSid, command, args: argv.slice(1) }
+  return { workspaces, temp, mode, writeSids, tempWriteSid: parsedTempWriteSid, command, args: argv.slice(1) }
 }
 
 function requireDirectory(label: string, path: string): void {
@@ -115,20 +119,30 @@ function requireDirectory(label: string, path: string): void {
 
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2))
-  // Both directories are validated in both modes: a provider bug that passes
+  // Every writable root is validated in both modes: a provider bug that passes
   // a bogus root must fail loudly at the runner boundary, never mid-child.
-  requireDirectory('--workspace', parsed.workspace)
+  for (const workspace of parsed.workspaces) requireDirectory('--workspace', workspace)
   requireDirectory('--temp', parsed.temp)
 
-  const seamManaged = parsed.writeSid !== undefined || parsed.tempWriteSid !== undefined
+  const seamManaged = parsed.writeSids.length > 0 || parsed.tempWriteSid !== undefined
   if (parsed.mode === 'read-only' && seamManaged) {
     fail('read-only does not accept --write-sid or --temp-write-sid')
   }
-  if (parsed.mode === 'workspace-write' && (parsed.writeSid === undefined) !== (parsed.tempWriteSid === undefined)) {
-    fail('workspace-write requires --write-sid and --temp-write-sid together')
-  }
   if (parsed.mode === 'workspace-write') {
-    assertTempRootOutsideWorkspace(parsed.workspace, parsed.temp)
+    // The seam-managed grant contract is all-or-nothing: one --write-sid per
+    // --workspace (order-paired) plus --temp-write-sid, or none of them.
+    if (parsed.writeSids.length > 0 && parsed.tempWriteSid === undefined) {
+      fail('workspace-write requires --write-sid pairs together with --temp-write-sid')
+    }
+    if (parsed.writeSids.length === 0 && parsed.tempWriteSid !== undefined) {
+      fail('workspace-write requires --write-sid pairs together with --temp-write-sid')
+    }
+    if (parsed.writeSids.length !== 0 && parsed.writeSids.length !== parsed.workspaces.length) {
+      fail(`--write-sid count (${parsed.writeSids.length}) must match --workspace count (${parsed.workspaces.length})`)
+    }
+    for (const workspace of parsed.workspaces) {
+      assertTempRootOutsideWorkspace(workspace, parsed.temp)
+    }
   }
 
   const api = await win32()
@@ -144,12 +158,14 @@ async function main(): Promise<number> {
   let initialized = false
   try {
     let privateTempDir: string | null = null
-    let writeSid: string | undefined
+    let writeSids: string[] = []
     let privateTempSid: string | undefined
     if (parsed.mode === 'workspace-write') {
-      writeSid = workspaceWriteSid(parsed.workspace)
+      writeSids = parsed.workspaces.map(workspaceWriteSid)
       if (seamManaged) {
-        if (parsed.writeSid !== writeSid) fail('--write-sid does not match --workspace')
+        for (const [index, sid] of writeSids.entries()) {
+          if (parsed.writeSids[index] !== sid) fail(`--write-sid ${index} does not match --workspace ${parsed.workspaces[index]}`)
+        }
         privateTempDir = parsed.temp
         privateTempSid = tempWriteSid(privateTempDir)
         if (parsed.tempWriteSid !== privateTempSid) fail('--temp-write-sid does not match --temp')
@@ -160,10 +176,10 @@ async function main(): Promise<number> {
       }
     }
     sandbox = new AclSandbox({
-      writableDirs: parsed.mode === 'workspace-write' ? [parsed.workspace] : [],
+      writableDirs: parsed.mode === 'workspace-write' ? parsed.workspaces : [],
       tempDir: privateTempDir,
       mode: parsed.mode,
-      ...writeSid === undefined ? {} : { writeSid },
+      ...(parsed.mode === 'workspace-write' ? { writeSids } : {}),
       ...privateTempSid === undefined ? {} : { tempWriteSid: privateTempSid },
       manageDacls: !seamManaged,
     })

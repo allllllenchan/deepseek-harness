@@ -443,6 +443,52 @@ describe.skipIf(!isWin32)('ACL editing', () => {
       .toThrow(/requires at least one write SID/)
   })
 
+  it('per-root write SIDs grant each root its own ACE and leave both standing after dispose', async () => {
+    const api = await win32()
+    const workspaceDir = scratch()
+    const taskDir = scratch()
+    const sandbox = new AclSandbox({
+      writableDirs: [workspaceDir, taskDir],
+      tempDir: null,
+      writeSids: ['S-1-4-9100-1', 'S-1-4-9100-2'],
+      mode: 'workspace-write',
+    })
+    await sandbox.init()
+    sandbox.dispose()
+    // Each root carries ITS OWN identity: a session whose token lacks one of
+    // them cannot reach that root through the other root's standing ACE.
+    expect(readDirectAces(api, workspaceDir).some(ace => ace.sid === 'S-1-4-9100-1')).toBe(true)
+    expect(readDirectAces(api, workspaceDir).some(ace => ace.sid === 'S-1-4-9100-2')).toBe(false)
+    expect(readDirectAces(api, taskDir).some(ace => ace.sid === 'S-1-4-9100-2')).toBe(true)
+    expect(readDirectAces(api, taskDir).some(ace => ace.sid === 'S-1-4-9100-1')).toBe(false)
+  })
+
+  it('writeSids validates alignment, distinctness, exclusivity with writeSid, and read-only exclusion', () => {
+    const dir = scratch()
+    const second = scratch()
+    // Length must align with writableDirs.
+    expect(() => new AclSandbox({
+      writableDirs: [dir, second], tempDir: null, writeSids: ['S-1-4-9200-1'], mode: 'workspace-write',
+    })).toThrow(/writeSids must align with writableDirs/)
+    // One capability identity per root: duplicates are refused (a shared SID
+    // would let either root's token write the other).
+    expect(() => new AclSandbox({
+      writableDirs: [dir, second], tempDir: null, writeSids: ['S-1-4-9200-1', 'S-1-4-9200-1'], mode: 'workspace-write',
+    })).toThrow(/writeSids must be distinct/)
+    // The scalar and per-root forms are mutually exclusive.
+    expect(() => new AclSandbox({
+      writableDirs: [dir], tempDir: null, writeSid: 'S-1-4-9200-1', writeSids: ['S-1-4-9200-2'], mode: 'workspace-write',
+    })).toThrow(/mutually exclusive/)
+    // read-only accepts no write capability at all.
+    expect(() => new AclSandbox({
+      writableDirs: [dir], mode: 'read-only', writeSids: ['S-1-4-9200-1'],
+    })).toThrow(/read-only does not accept write SIDs/)
+    // A per-root SID must not collide with the temp capability.
+    expect(() => new AclSandbox({
+      writableDirs: [dir], tempDir: second, writeSids: ['S-1-4-9200-1'], tempWriteSid: 'S-1-4-9200-1', mode: 'workspace-write',
+    })).toThrow(/must be distinct/)
+  })
+
   it('the per-path lock is exclusive: a second immediate lock attempt fails with ERROR_LOCK_VIOLATION until release', async () => {
     const api = await win32()
     const dir = scratch()

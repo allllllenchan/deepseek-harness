@@ -318,7 +318,16 @@ export class LocalSandboxProvider extends SandboxProvider {
    */
   async confine(argv: readonly string[], policy: SandboxPolicy, signal?: AbortSignal): Promise<ConfinedArgv> {
     signal?.throwIfAborted()
-    policy = { ...policy, workspaceRoot: canonicalPath(policy.workspaceRoot) }
+    policy = {
+      ...policy,
+      workspaceRoot: canonicalPath(policy.workspaceRoot),
+      // Extra roots get the SAME canonical identity as the primary root: the
+      // per-root write SID is derived from the path, so two spellings of one
+      // directory must not mint two identities (or an ACE the token misses).
+      ...policy.extraWritableRoots === undefined
+        ? {}
+        : { extraWritableRoots: policy.extraWritableRoots.map(canonicalPath) },
+    }
     if (this.runnerCommand !== undefined) {
       return Promise.resolve<ConfinedArgv>({
         argv: [...this.runnerCommand, ...bwrapProfileArgs(policy), '--', ...argv],
@@ -339,6 +348,11 @@ export class LocalSandboxProvider extends SandboxProvider {
 
   /** The selected rung's runner invocation (program + profile arguments) for one policy. */
   private runnerArgv(runner: SelectedRunner['runner'], policy: SandboxPolicy): string[] {
+    if ((policy.extraWritableRoots?.length ?? 0) > 0 && runner !== 'windows-acl') {
+      // Fail closed, never silently ignore: a runner whose profile cannot
+      // carry the extra roots would confine to the primary root only.
+      throw new Error(`sandbox-local: extra writable roots are only supported by the windows-acl runner (selected: ${runner}); refusing to confine without them`)
+    }
     switch (runner) {
       case 'bwrap': return ['bwrap', ...bwrapProfileArgs(policy)]
       case 'landlock': return [this.landlockLauncher(), ...landlockProfileArgs(policy)]
@@ -362,45 +376,52 @@ export class LocalSandboxProvider extends SandboxProvider {
    */
   private windowsAclRunnerArgv(policy: SandboxPolicy): string[] {
     const sessionId = policy.sessionId
+    // Every writable root travels as its own --workspace/--write-sid pair:
+    // per-root deterministic SIDs keep a session confined WITHOUT a given
+    // extra root unable to write it through another session's standing ACE.
+    const roots = [policy.workspaceRoot, ...(policy.extraWritableRoots ?? [])]
     if (sessionId === undefined || policy.mode === 'read-only') {
       return [
         ...this.windowsAclRunnerInvocation(),
-        '--workspace', policy.workspaceRoot,
+        ...roots.flatMap(root => ['--workspace', root]),
         '--temp', tmpdir(),
         '--mode', policy.mode,
       ]
     }
-    const temp = this.materializeAclGrant(sessionId, policy.workspaceRoot)
+    const temp = this.materializeAclGrant(sessionId, roots)
     return [
       ...this.windowsAclRunnerInvocation(),
-      '--workspace', policy.workspaceRoot,
+      ...roots.flatMap(root => ['--workspace', root]),
       '--temp', temp.dir,
       '--mode', policy.mode,
-      '--write-sid', workspaceWriteSid(policy.workspaceRoot),
+      ...roots.flatMap(root => ['--write-sid', workspaceWriteSid(root)]),
       '--temp-write-sid', temp.writeSid,
     ]
   }
 
   /**
    * Materialize one workspace-write policy's ACEs once per provider
-   * lifetime. The workspace SID and standing root grant are shared by the
-   * workspace. The temp directory is random and carries a distinct SID, so
-   * another session on the same workspace cannot use the shared workspace
-   * SID to enter it. A fresh provider always chooses a new path; crash
-   * residue therefore cannot collide with or authorize a resumed session.
-   * Fail-closed: a half-materialized temp grant is revoked and its directory
-   * removed before the error propagates.
+   * lifetime. EACH root's workspace SID and standing grant are shared by that
+   * root across sessions (the per-workspace reuse cache). The temp directory
+   * is random and carries a distinct SID, so another session on the same
+   * roots cannot use the shared workspace SIDs to enter it. A fresh provider
+   * always chooses a new path; crash residue therefore cannot collide with
+   * or authorize a resumed session. Fail-closed: a half-materialized temp
+   * grant is revoked and its directory removed before the error propagates.
    * @param sessionId - the policy's calling-session identity.
-   * @param workspaceRoot - the resolved policy root.
-   * @returns the pair's private temp directory and write capability.
+   * @param roots - the resolved writable roots (primary first, extras after).
+   * @returns the roots' shared private temp directory and write capability.
    */
-  private materializeAclGrant(sessionId: SessionId, workspaceRoot: string): AclTempCapability {
-    assertTempRootOutsideWorkspace(workspaceRoot, tmpdir())
-    const writeSid = workspaceWriteSid(workspaceRoot)
-    if (!this.workspaceGrants.has(workspaceRoot)) {
+  private materializeAclGrant(sessionId: SessionId, roots: readonly string[]): AclTempCapability {
+    for (const root of roots) {
+      assertTempRootOutsideWorkspace(root, tmpdir())
+    }
+    for (const root of roots) {
+      if (this.workspaceGrants.has(root)) continue
+      const writeSid = workspaceWriteSid(root)
       const grant = AclWriteGrant.create(writeSid)
       try {
-        grant.add(workspaceRoot, true)
+        grant.add(root, true)
       } catch (error) {
         // Free the SID; a standing ACE (if the apply succeeded before a
         // post-apply throw) is the intended end state, not an error
@@ -412,9 +433,9 @@ export class LocalSandboxProvider extends SandboxProvider {
         }
         throw error
       }
-      this.workspaceGrants.set(workspaceRoot, grant)
+      this.workspaceGrants.set(root, grant)
     }
-    const key = JSON.stringify([String(sessionId), workspaceRoot])
+    const key = JSON.stringify([String(sessionId), ...roots])
     const existing = this.tempCapabilities.get(key)
     if (existing !== undefined) return existing
     const tempDir = mkdtempSync(join(tmpdir(), 'dsh-'))

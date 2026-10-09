@@ -15,7 +15,7 @@ import SandboxPolicyService, { SANDBOX_MODES, setSandboxMode } from '@deepseek-a
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt, { renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 
-async function mounted(config: { mode?: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot?: string } = {}) {
+async function mounted(config: { mode?: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot?: string; extraWritableRoots?: string[] } = {}) {
   const ctx = new Context()
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(SandboxPolicyService, config)
@@ -53,6 +53,50 @@ describe('SandboxPolicyService', () => {
     const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/ws/../ws/./sub' })
     expect(ctx.sandboxPolicy.defaultMode).toBe('workspace-write')
     expect(ctx.sandboxPolicy.workspaceRoot).toBe('/ws/../ws/./sub')
+  })
+
+  it('appends configured extra writable roots to every resolved policy', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/projects/current', extraWritableRoots: ['/tasks/main', '/shared/ddc'] })
+    expect(ctx.sandboxPolicy.resolve()).toEqual({
+      mode: 'workspace-write',
+      workspaceRoot: '/projects/current',
+      extraWritableRoots: ['/tasks/main', '/shared/ddc'],
+    })
+    // A session cwd replaces the PRIMARY root; extras still apply.
+    expect(ctx.sandboxPolicy.resolve({ session: session('sess-extras', '/projects/other') })).toEqual({
+      mode: 'workspace-write',
+      workspaceRoot: '/projects/other',
+      extraWritableRoots: ['/tasks/main', '/shared/ddc'],
+      sessionId: SessionId('sess-extras'),
+    })
+  })
+
+  it('drops nested and duplicate extra roots keeping the widest, with a warning', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/projects/current', extraWritableRoots: ['/tasks', '/tasks/nested', '/tasks', '/shared'] })
+    const warnings: string[] = []
+    // Intercept the service's warning sink: the reduction is observable ONLY
+    // through the dropped-entry warnings (the kept set is the other half).
+    ctx.logger.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')) }
+    const policy = ctx.sandboxPolicy.resolve()
+    expect(policy.extraWritableRoots).toEqual(['/tasks', '/shared'])
+    expect(warnings.join('\n')).toContain('/tasks/nested')
+    expect(warnings.join('\n')).toContain('/tasks')
+    // An extra that CONTAINS the workspace root is kept (it is wider than the
+    // primary); only extra-vs-extra and exact duplicates reduce.
+    const wider = await mounted({ mode: 'workspace-write', workspaceRoot: '/projects/current', extraWritableRoots: ['/projects'] })
+    expect(wider.sandboxPolicy.resolve().extraWritableRoots).toEqual(['/projects'])
+  })
+
+  it('omits extraWritableRoots entirely when none are configured', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/projects/current' })
+    expect('extraWritableRoots' in ctx.sandboxPolicy.resolve()).toBe(false)
+  })
+
+  it('keeps extraWritableRoots on the policy under read-only (enforcers ignore them, the seam fails closed)', async () => {
+    const ctx = await mounted({ mode: 'read-only', workspaceRoot: '/projects/current', extraWritableRoots: ['/tasks/main'] })
+    // Policy resolution is mode-agnostic about the roots; the enforcing
+    // provider decides (read-only grants nothing).
+    expect(ctx.sandboxPolicy.resolve().extraWritableRoots).toEqual(['/tasks/main'])
   })
 
   it('rejects a relative deployment workspace root at load', async () => {
@@ -161,13 +205,24 @@ describe('SandboxPolicyService', () => {
 })
 
 describe('sandbox:policy request context', () => {
-  async function promptMounted(config: { mode?: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot?: string } = {}): Promise<Context> {
+  async function promptMounted(config: { mode?: 'read-only' | 'workspace-write' | 'danger-full-access'; workspaceRoot?: string; extraWritableRoots?: string[] } = {}): Promise<Context> {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SandboxPolicyService, config)
     return ctx
   }
+
+  it('renders every writable root in the multi-root policy text', async () => {
+    const ctx = await promptMounted({
+      mode: 'workspace-write',
+      workspaceRoot: '/projects/current',
+      extraWritableRoots: ['/tasks/main', '/shared/ddc'],
+    })
+    expect(await policyContext(ctx, session('sess-multi-root', '/projects/current'))).toBe(
+      `Current DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspaces: ${JSON.stringify(['/projects/current', '/tasks/main', '/shared/ddc'])}. Some platform temporary areas may also be writable.`,
+    )
+  })
 
   it.each(['read-only', 'workspace-write', 'danger-full-access'] as const)('renders the exact %s policy without a capability inventory', async (mode) => {
     const ctx = await promptMounted({ mode, workspaceRoot: '/fallback' })

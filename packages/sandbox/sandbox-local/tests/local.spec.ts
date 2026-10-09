@@ -170,6 +170,17 @@ describe('runnerCommand config', () => {
 })
 
 describe('the platform chains', () => {
+  it('extra writable roots fail closed on a runner whose profile cannot carry them', async () => {
+    // bwrap's mount profile has a single writable bind set: silently confining
+    // to the primary root would grant LESS than the policy promises, so the
+    // wrap must refuse instead. (Only windows-acl carries per-root SIDs.)
+    const probeBwrap = vi.fn(() => true)
+    const { sandbox } = await setup({}, { platform: 'linux', probeBwrap })
+    await expect(sandbox.confine(['true'], { ...WW, extraWritableRoots: ['/tasks'] }))
+      .rejects.toThrow(/extra writable roots are only supported by the windows-acl runner \(selected: bwrap\)/)
+    expect(probeBwrap).toHaveBeenCalledTimes(1)
+  })
+
   it('linux probes bwrap first: a passing probe wraps with the bwrap dialect at full enforcement', async () => {
     const probeBwrap = vi.fn(() => true)
     const probeLandlock = vi.fn(() => 'full' as const)

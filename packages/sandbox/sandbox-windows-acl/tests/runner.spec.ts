@@ -258,6 +258,103 @@ describe.skipIf(!isWin32 || !pwshAvailable())('windows-acl runner', () => {
     }
   }, 30_000)
 
+  it('multi-root: a session granted BOTH roots writes both, and a session granted only the primary cannot reach the extra root through its standing ACE', () => {
+    const taskDir = join(scratchRoot, 'task-root')
+    mkdirSync(taskDir)
+    const primarySid = workspaceWriteSid(writableDir)
+    const taskSid = workspaceWriteSid(taskDir)
+    const tempDir = join(isolatedTemp, 'multi-root-temp')
+    mkdirSync(tempDir)
+    const tempSid = tempWriteSid(tempDir)
+    // Both roots carry their OWN standing capability, exactly as the provider
+    // materializes them for a multi-root session.
+    const primaryGrant = AclWriteGrant.create(primarySid)
+    const taskGrant = AclWriteGrant.create(taskSid)
+    const tempGrant = AclWriteGrant.create(tempSid)
+    primaryGrant.add(writableDir)
+    taskGrant.add(taskDir)
+    tempGrant.add(tempDir)
+    const probe = [
+      "const fs = require('node:fs');",
+      "const targets = [['PRIMARY', process.argv[1]], ['EXTRA', process.argv[2]], ['TEMP', process.argv[3]]];",
+      'for (const [name, target] of targets) {',
+      "try { fs.writeFileSync(target, name); console.log(name + ': OK'); } catch { console.log(name + ': DENIED'); }",
+      '}',
+    ].join('')
+    try {
+      // Session A: allowed BOTH roots — every target lands.
+      const resultA = runRunner([
+        '--workspace', writableDir, '--workspace', taskDir, '--temp', tempDir, '--mode', 'workspace-write',
+        '--write-sid', primarySid, '--write-sid', taskSid, '--temp-write-sid', tempSid,
+        '--', process.execPath, '-e', probe,
+        join(writableDir, 'a-primary.txt'), join(taskDir, 'a-extra.txt'), join(tempDir, 'a-temp.txt'),
+      ])
+      expect(resultA.status, `stderr: ${resultA.stderr}`).toBe(0)
+      expect(resultA.stdout).toContain('PRIMARY: OK')
+      expect(resultA.stdout).toContain('EXTRA: OK')
+      expect(resultA.stdout).toContain('TEMP: OK')
+
+      // Session B: single-root. The extra root's standing ACE still exists on
+      // disk, but this token does NOT carry its SID — the intersection check
+      // must deny the write (the per-root-SID isolation property).
+      const singleTempDir = join(isolatedTemp, 'single-root-temp')
+      mkdirSync(singleTempDir)
+      const singleTempSid = tempWriteSid(singleTempDir)
+      const singleTempGrant = AclWriteGrant.create(singleTempSid)
+      singleTempGrant.add(singleTempDir)
+      try {
+        const resultB = runRunner([
+          '--workspace', writableDir, '--temp', singleTempDir, '--mode', 'workspace-write',
+          '--write-sid', primarySid, '--temp-write-sid', singleTempSid,
+          '--', process.execPath, '-e', probe,
+          join(writableDir, 'b-primary.txt'), join(taskDir, 'b-extra-leak.txt'), join(singleTempDir, 'b-temp.txt'),
+        ])
+        expect(resultB.status, `stderr: ${resultB.stderr}`).toBe(0)
+        expect(resultB.stdout).toContain('PRIMARY: OK')
+        expect(resultB.stdout).toContain('EXTRA: DENIED')
+        expect(existsSync(join(taskDir, 'b-extra-leak.txt'))).toBe(false)
+      } finally {
+        singleTempGrant.dispose()
+        rmSync(singleTempDir, { recursive: true, force: true })
+      }
+    } finally {
+      primaryGrant.dispose()
+      taskGrant.dispose()
+      tempGrant.dispose()
+      rmSync(tempDir, { recursive: true, force: true })
+      rmSync(taskDir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  it('multi-root argv contract fails closed: write-sid count mismatch and a temp inside any root are runner failures', () => {
+    const taskDir = join(scratchRoot, 'contract-root')
+    mkdirSync(taskDir)
+    const primarySid = workspaceWriteSid(writableDir)
+    const mismatch = runRunner([
+      '--workspace', writableDir, '--workspace', taskDir, '--temp', isolatedTemp, '--mode', 'workspace-write',
+      '--write-sid', primarySid, '--temp-write-sid', tempWriteSid(isolatedTemp),
+      '--', process.execPath, '-e', "require('node:fs').writeFileSync(process.argv[1], 'x')", join(writableDir, 'mismatch-ran.txt'),
+    ])
+    expect(mismatch.status).toBe(127)
+    expect(mismatch.stderr).toContain('windows-acl-run:')
+    expect(mismatch.stderr).toContain('must match --workspace count')
+    expect(existsSync(join(writableDir, 'mismatch-ran.txt'))).toBe(false)
+
+    // The temp area must stay outside EVERY granted root: nesting it inside
+    // the second root would merge the revocable temp capability with that
+    // root's standing capability.
+    const nestedTemp = join(taskDir, 'nested-temp')
+    mkdirSync(nestedTemp)
+    const nested = runRunner([
+      '--workspace', writableDir, '--workspace', taskDir, '--temp', nestedTemp, '--mode', 'workspace-write',
+      '--', process.execPath, '-e', "require('node:fs').writeFileSync(process.argv[1], 'x')", join(writableDir, 'nested-ran.txt'),
+    ])
+    expect(nested.status).toBe(127)
+    expect(nested.stderr).toContain('temp root must be outside the workspace')
+    expect(existsSync(join(writableDir, 'nested-ran.txt'))).toBe(false)
+    rmSync(taskDir, { recursive: true, force: true })
+  }, 30_000)
+
   it('agentless workspace-write creates a fresh private temp per call and removes it on exit', () => {
     const captureA = join(writableDir, 'agentless-temp-a.txt')
     const captureB = join(writableDir, 'agentless-temp-b.txt')
