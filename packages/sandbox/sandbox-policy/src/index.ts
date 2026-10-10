@@ -29,8 +29,20 @@ import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandb
 import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import { setSandboxSpec, type SessionSandboxSpec, type SessionSpecSource } from './session-spec.ts'
 
 export { SANDBOX_MODES, setSandboxMode } from './session-mode.ts'
+export { parseSessionSandboxSpec, setSandboxSpec, type SessionSandboxSpec, type SessionSpecSource } from './session-spec.ts'
+
+/**
+ * The session-spec projection's state schema: the FIRST `sandbox/spec`
+ * payload, or null before one (deployment/workspace values apply at resolve
+ * time).
+ */
+const sandboxSpecStateSchema = zod.object({
+  writableRoots: zod.array(zod.string()).optional(),
+  tempRoot: zod.string().optional(),
+}).nullable()
 
 /** Preserve execution-world spelling; enforcing providers resolve filesystem identity on their host. */
 function resolveWorkspaceRoot(path: string): string {
@@ -178,6 +190,8 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
     /** Last logged sandbox-mode override, or null before one (deployment default applies at resolve time). */
     sandboxMode: SandboxModeState
+    /** The sealed session sandbox spec (first event, superseded only by a user-sourced one), or null before one. */
+    sandboxSpec: SessionSandboxSpec | null
   }
 }
 
@@ -251,6 +265,24 @@ export class SandboxPolicyService extends Service {
       apply: (state, event) => (event.type === 'sandbox/mode' ? event.data.mode : state),
     })
 
+    // Baseline + user-only supersede: the FIRST `sandbox/spec` event (the
+    // creator's declaration) seals the boundary, and a later event takes
+    // effect ONLY when a human declared it (`source: 'user'`). A later
+    // `'spawn'`/plugin/script append is folded away — that is what makes "the
+    // agent cannot move its own boundary" a property of the log rather than a
+    // convention callers must respect.
+    ctx.sessionProjections.register({
+      key: 'sandboxSpec',
+      stateVersion: 1,
+      stateSchema: sandboxSpecStateSchema,
+      init: () => null,
+      apply: (state, event) => {
+        if (event.type !== 'sandbox/spec') return state
+        if (state === null) return event.data.spec
+        return event.data.source === 'user' ? event.data.spec : state
+      },
+    })
+
     ctx.inject(['systemPrompt'], (scope: Context) => {
       scope.systemPrompt.context({
         name: 'sandbox:policy',
@@ -266,33 +298,73 @@ export class SandboxPolicyService extends Service {
   }
 
   /**
-   * Resolve the complete policy for one capability call. An approved explicit
-   * mode outranks the session's last `sandbox/mode` event, which outranks the
-   * deployment default. A session cwd is its workspace-write boundary; the
+   * Resolve the complete policy for one capability call. Precedence, weakest
+   * last: an approved explicit mode, the session's last `sandbox/mode` event,
+   * the deployment default; and for the file boundary the session's
+   * `sandbox/spec` (REPLACE semantics for roots), the workspace binding, the
+   * deployment config. A session cwd is its workspace-write boundary; the
    * configured root is the fallback for agentless calls and sessions without a
    * cwd.
    * @param request - optional session and approved mode override.
-   * @returns the fully resolved per-call mode and absolute workspace root.
+   * @returns the fully resolved per-call mode and absolute writable roots.
    */
   resolve(request: SandboxPolicyRequest = {}): SandboxExecutionPolicy {
     const { session } = request
     const workspaceRoot = resolveWorkspaceRoot(session?.header.cwd ?? this.workspaceRoot)
-    // Workspace binding first (the SandboxSpec workspace level), then the
-    // deployment value: an entry's field wins field-by-field, and an absent
-    // entry changes nothing.
+    const spec = session === undefined ? undefined : this.specOf(session)
+    // Session binding: `writableRoots` REPLACES the root set (its first entry
+    // takes the place `workspaceRoot` otherwise holds), which is how a session
+    // runs NARROWER than its workspace.
+    const specRoots = spec?.writableRoots
+    const primaryRoot = specRoots?.[0] ?? workspaceRoot
     const bound = this.workspaceSandboxOf(workspaceRoot)
-    const configuredExtras = bound?.extraWritableRoots ?? this.extraWritableRoots
+    // Workspace binding next (the SandboxSpec workspace level), then the
+    // deployment value: a field wins field-by-field, and an absent entry
+    // changes nothing.
+    const configuredExtras = specRoots === undefined
+      ? bound?.extraWritableRoots ?? this.extraWritableRoots
+      : specRoots.slice(1)
     const extraWritableRoots = configuredExtras.length === 0
       ? []
-      : reduceExtraRoots(workspaceRoot, configuredExtras, (message) => { this.ctx.logger.warn(message) })
-    const tempRoot = bound?.tempRoot ?? this.tempRoot
+      : reduceExtraRoots(primaryRoot, configuredExtras, (message) => { this.ctx.logger.warn(message) })
+    const tempRoot = spec?.tempRoot ?? bound?.tempRoot ?? this.tempRoot
     return {
       mode: request.mode ?? (session === undefined ? undefined : this.overrideOf(session)) ?? this.defaultMode,
-      workspaceRoot,
+      workspaceRoot: primaryRoot,
       ...(extraWritableRoots.length === 0 ? {} : { extraWritableRoots }),
       ...tempRoot === undefined ? {} : { tempRoot },
       ...session === undefined ? {} : { sessionId: session.id },
     }
+  }
+
+  /**
+   * Write one session's sandbox spec (the creation-time and GUI write path).
+   * The projection's baseline/supersede rule is authoritative — a second
+   * `'spawn'`-sourced write is recorded but inert, and this method warns when
+   * it sees one, so a caller that expected to move the boundary learns why it
+   * did not.
+   * @param session - the session to bind.
+   * @param spec - the writable roots and/or temp root for this session.
+   * @param source - `'spawn'` (creation) or `'user'` (a human through the GUI).
+   */
+  setSessionSpec(session: Session, spec: SessionSandboxSpec, source: SessionSpecSource): void {
+    const existing = this.specOf(session)
+    if (existing !== undefined && source !== 'user') {
+      this.ctx.logger.warn(
+        `sandbox-policy: ignoring a '${source}' sandbox spec for session ${String(session.id)} — `
+        + 'the session already sealed its boundary and only a user-sourced change may supersede it',
+      )
+    }
+    setSandboxSpec(session, spec, source)
+  }
+
+  /**
+   * The session's sealed spec, from the first-write-wins fold.
+   * @param session - session whose log supplies the spec.
+   * @returns the sealed spec, or `undefined` without one.
+   */
+  specOf(session: Session): SessionSandboxSpec | undefined {
+    return this.ctx.sessionProjections.stateOf(session, 'sandboxSpec') ?? undefined
   }
 
   /**

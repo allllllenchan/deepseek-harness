@@ -154,6 +154,79 @@ describe('SandboxPolicyService', () => {
     expect(ok.sandboxPolicy.tempRoot).toBe('/absolute/temp')
   })
 
+  it('a creation-declared spec REPLACES the root set (narrower than the workspace) and overrides tempRoot', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/projects/current', extraWritableRoots: ['/deploy/extra'], tempRoot: '/deploy/temp' })
+    ctx.logger.warn = () => {}
+    const bound = session('sess-spec', '/projects/current')
+    ctx.sandboxPolicy.setSessionSpec(bound, { writableRoots: ['/projects/current/src', '/tasks/main'], tempRoot: '/sess/temp' }, 'spawn')
+    expect(ctx.sandboxPolicy.resolve({ session: bound })).toEqual({
+      mode: 'workspace-write',
+      // The first declared root takes the place `workspaceRoot` otherwise holds,
+      // so the session writes ONLY under the subdirectory + the task root.
+      workspaceRoot: '/projects/current/src',
+      extraWritableRoots: ['/tasks/main'],
+      tempRoot: '/sess/temp',
+      sessionId: SessionId('sess-spec'),
+    })
+  })
+
+  it('seals at creation: a later non-user spec is inert, a user-sourced one supersedes', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/projects/current' })
+    const warnings: string[] = []
+    ctx.logger.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')) }
+    const target = session('sess-seal', '/projects/current')
+    ctx.sandboxPolicy.setSessionSpec(target, { writableRoots: ['/projects/current'] }, 'spawn')
+    // A second spawn-sourced write (a delegated child seeded in, a plugin, a
+    // stray script) is recorded but cannot move the boundary.
+    ctx.sandboxPolicy.setSessionSpec(target, { writableRoots: ['/'] }, 'spawn')
+    expect(ctx.sandboxPolicy.resolve({ session: target }).workspaceRoot).toBe('/projects/current')
+    expect(warnings.join('\n')).toContain('only a user-sourced change may supersede it')
+    // A human (GUI) change does take effect, in both directions.
+    ctx.sandboxPolicy.setSessionSpec(target, { writableRoots: ['/projects/current/src'] }, 'user')
+    expect(ctx.sandboxPolicy.resolve({ session: target }).workspaceRoot).toBe('/projects/current/src')
+    ctx.sandboxPolicy.setSessionSpec(target, { writableRoots: ['/projects/current', '/tasks/main'] }, 'user')
+    const widened = ctx.sandboxPolicy.resolve({ session: target })
+    expect(widened.workspaceRoot).toBe('/projects/current')
+    expect(widened.extraWritableRoots).toEqual(['/tasks/main'])
+  })
+
+  it('a session without a spec keeps the workspace binding and deployment values', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/fallback', extraWritableRoots: ['/deploy/extra'], tempRoot: '/deploy/temp' })
+    ctx.logger.warn = () => {}
+    const plain = session('sess-plain', '/projects/current')
+    expect(ctx.sandboxPolicy.specOf(plain)).toBeUndefined()
+    expect(ctx.sandboxPolicy.resolve({ session: plain })).toEqual({
+      mode: 'workspace-write',
+      workspaceRoot: '/projects/current',
+      extraWritableRoots: ['/deploy/extra'],
+      tempRoot: '/deploy/temp',
+      sessionId: SessionId('sess-plain'),
+    })
+  })
+
+  it('rejects an invalid spec before appending anything', async () => {
+    const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/projects/current' })
+    const target = session('sess-invalid', '/projects/current')
+    expect(() => { ctx.sandboxPolicy.setSessionSpec(target, { writableRoots: [] }, 'spawn') })
+      .toThrow(/invalid session sandbox spec/u)
+    expect(() => { ctx.sandboxPolicy.setSessionSpec(target, { writableRoots: ['relative/root'] }, 'spawn') })
+      .toThrow(/must be an absolute execution-world path/u)
+    expect(() => { ctx.sandboxPolicy.setSessionSpec(target, { tempRoot: 'relative/temp' }, 'spawn') })
+      .toThrow(/must be an absolute execution-world path/u)
+    // Nothing was sealed by the failed attempts.
+    expect(ctx.sandboxPolicy.specOf(target)).toBeUndefined()
+    expect(ctx.sandboxPolicy.resolve({ session: target }).workspaceRoot).toBe('/projects/current')
+  })
+
+  it('keeps a session spec on the policy under read-only (enforcers ignore it)', async () => {
+    const ctx = await mounted({ mode: 'read-only', workspaceRoot: '/projects/current' })
+    const target = session('sess-ro', '/projects/current')
+    ctx.sandboxPolicy.setSessionSpec(target, { writableRoots: ['/projects/current/src'] }, 'spawn')
+    const policy = ctx.sandboxPolicy.resolve({ session: target })
+    expect(policy.mode).toBe('read-only')
+    expect(policy.workspaceRoot).toBe('/projects/current/src')
+  })
+
   it('omits extraWritableRoots entirely when none are configured', async () => {
     const ctx = await mounted({ mode: 'workspace-write', workspaceRoot: '/projects/current' })
     expect('extraWritableRoots' in ctx.sandboxPolicy.resolve()).toBe(false)
