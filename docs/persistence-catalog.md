@@ -50,6 +50,7 @@ The [format references](persistence-changes/historical-formats/README.md) cover 
 | `event:request/context` | event | `37cbc9cf06d494cfe5c67f078af1605eacb8e4c2c853e9e26455b73de0ee7ccf` | [`{ type: "request/context" }`](#persistence-type-sha256-37cbc9cf06d494cfe5c67f078af1605eacb8e4c2c853e9e26455b73de0ee7ccf) |
 | `event:request/header` | event | `4208123b50df5006b181481ab45fcf1cde807b88d3fd4d340090bc2e202fac41` | [`{ type: "request/header" }`](#persistence-type-sha256-4208123b50df5006b181481ab45fcf1cde807b88d3fd4d340090bc2e202fac41) |
 | `event:sandbox/mode` | event | `516da4cdd6d2f1e5ce488e648578ca51f40e458f707b803e5b24de870e799415` | [`{ type: "sandbox/mode" }`](#persistence-type-sha256-516da4cdd6d2f1e5ce488e648578ca51f40e458f707b803e5b24de870e799415) |
+| `event:sandbox/spec` | event | `a7d338468645cbd36e79891d389bac3095e9914d2db4e1d54eee0a3c43ce192b` | [`{ type: "sandbox/spec" }`](#persistence-type-sha256-a7d338468645cbd36e79891d389bac3095e9914d2db4e1d54eee0a3c43ce192b) |
 | `event:schedule/change` | event | `2a7f86849ae54b3398ee49661a757c4fcb59a6192b7036ee2ff514617e13fb42` | [`{ type: "schedule/change" }`](#persistence-type-sha256-2a7f86849ae54b3398ee49661a757c4fcb59a6192b7036ee2ff514617e13fb42) |
 | `event:session-log-deepseek/delivery-accepted` | event | `d63b8b8ffad9c02fd80c43a17df4f240c1fe8118ecca9de34f9d5871838ab5b9` | [`{ type: "session-log-deepseek/delivery-accepted" }`](#persistence-type-sha256-d63b8b8ffad9c02fd80c43a17df4f240c1fe8118ecca9de34f9d5871838ab5b9) |
 | `event:session/end-seed` | event | `5e6db6e24948d4a853c71cb9fabd252ad051ce93d4672c1266cf837c1c17b84e` | [`{ type: "session/end-seed" }`](#persistence-type-sha256-5e6db6e24948d4a853c71cb9fabd252ad051ce93d4672c1266cf837c1c17b84e) |
@@ -758,6 +759,26 @@ Source: [`packages/core/session/src/types.ts:390`](../packages/core/session/src/
 ```
 
 Source: [`packages/sandbox/sandbox-policy/src/session-mode.ts:33`](../packages/sandbox/sandbox-policy/src/session-mode.ts)
+
+<a id="sandboxspec--log-only"></a>
+
+#### `sandbox/spec` — log-only
+
+```ts persistence-catalog
+/**
+ * The session's sandbox spec was set — log-only (like `approval/*`; NOT a
+ * surface event): durable and replayable, never in the model transcript.
+ * The FIRST such event is the baseline; a later one takes effect only when
+ * `source: 'user'` (see the module doc).
+ */
+'sandbox/spec': {
+  spec: SessionSandboxSpec
+  /** Who declared this spec: the creator at spawn, or a human through the GUI. */
+  source: SessionSpecSource
+}
+```
+
+Source: [`packages/sandbox/sandbox-policy/src/session-spec.ts:52`](../packages/sandbox/sandbox-policy/src/session-spec.ts)
 
 ### `schedule/*`
 
@@ -2307,6 +2328,14 @@ SHA-256: `ca085dba2c877feceebf3c62f9d39c6c2a4d2314d97b94b3927a780fe8fe2bb2`
 
 `"sandbox/mode"`
 
+<a id="persistence-type-sha256-7acfccf002b9bdea59a68cc06146c7a2079435cfde2e948f2d6fc2d57bd520fc"></a>
+
+### `"sandbox/spec"`
+
+SHA-256: `7acfccf002b9bdea59a68cc06146c7a2079435cfde2e948f2d6fc2d57bd520fc`
+
+`"sandbox/spec"`
+
 <a id="persistence-type-sha256-d9edf1862e4471d6ad8a106a3f4160e0643874368707d50ecd8e27e5ee7a2567"></a>
 
 ### `"schedule"`
@@ -2426,6 +2455,14 @@ SHA-256: `1922cd79a70806c17758185a6ef0458bc1fb3900363906733421c16414da2509`
 SHA-256: `6f9e00383836275e46c0a9915767f9bb561be5fc30aae490174908a93e99a912`
 
 `"snapshot"`
+
+<a id="persistence-type-sha256-2273253414cfd3177e548c6f1bf2ebe23f39bb9aee61e23a431b2f5a5e3f450b"></a>
+
+### `"spawn"`
+
+SHA-256: `2273253414cfd3177e548c6f1bf2ebe23f39bb9aee61e23a431b2f5a5e3f450b`
+
+`"spawn"`
 
 <a id="persistence-type-sha256-c219efbdfd53b836786202ab4532913d555798f0a8615a4e9629736e3799fb70"></a>
 
@@ -4409,6 +4446,40 @@ Sources: [`packages/context/session-reference/src/types.ts:13`](../packages/cont
 | `kind` | required | `"session-reference"` |
 | `references` | required | [`{ capturedFormatVersion?, capturedThroughSeq, compacted, inputIndex, … }[]`](#persistence-type-sha256-df843efd87c78cf8de98f8e0d0216956cd568d0d0e56a22c853663e274aa1a18) |
 | `version` | required | `1` |
+
+<a id="persistence-type-sha256-ed6437b4965ab88d28404732dfc112027c53f5c8346b9fbfd48e0378dd1e6990"></a>
+
+<a id="persistence-type-packagessandboxsandbox-policysrcsession-spectssessionsandboxspec"></a>
+
+<a id="persistence-type-sessionsandboxspec"></a>
+
+### `SessionSandboxSpec`
+
+SHA-256: `ed6437b4965ab88d28404732dfc112027c53f5c8346b9fbfd48e0378dd1e6990`
+
+Sources: [`packages/sandbox/sandbox-policy/src/session-spec.ts:68`](../packages/sandbox/sandbox-policy/src/session-spec.ts)
+
+| Property | Presence | Type |
+|---|---|---|
+| `tempRoot` | optional | `string` |
+| `writableRoots` | optional | [`string[]`](#persistence-type-sha256-93c33d9687613293f8c95d46c4d922fe9ceae83b84c384beff5c3315abe005f2) |
+
+<a id="persistence-type-sha256-a0c6cd20f0492391d63c245295468a2123127bacfe216b2344980f5afb5d3ca3"></a>
+
+<a id="persistence-type-packagessandboxsandbox-policysrcsession-spectssessionspecsource"></a>
+
+<a id="persistence-type-sessionspecsource"></a>
+
+### `SessionSpecSource`
+
+SHA-256: `a0c6cd20f0492391d63c245295468a2123127bacfe216b2344980f5afb5d3ca3`
+
+Sources: [`packages/sandbox/sandbox-policy/src/session-spec.ts:61`](../packages/sandbox/sandbox-policy/src/session-spec.ts)
+
+One of:
+
+- `"spawn"`
+- `"user"`
 
 <a id="persistence-type-sha256-b56f6a885da3dc394c69a3e3cc5c0cfc4da15601b63fda4989eee8f40efc5be4"></a>
 
@@ -7516,6 +7587,19 @@ Sources: [`packages/compaction/compaction/src/types.ts:82`](../packages/compacti
 | `shadowedSeqs` | required | [`number[]`](#persistence-type-sha256-5d03ba38734809bcbd2a55221bd938b3b3fc34b49bb686c6113e9e4931e3aa78) |
 | `shadowedTokenCount` | required | `number` |
 
+<a id="persistence-type-sha256-7769d8608474910c06069132f580bf616d81dcaa70fc36cd8da670713c8931ce"></a>
+
+### `{ source, spec }`
+
+SHA-256: `7769d8608474910c06069132f580bf616d81dcaa70fc36cd8da670713c8931ce`
+
+Sources: [`packages/sandbox/sandbox-policy/src/session-spec.ts:52`](../packages/sandbox/sandbox-policy/src/session-spec.ts)
+
+| Property | Presence | Type |
+|---|---|---|
+| `source` | required | [`SessionSpecSource`](#persistence-type-sha256-a0c6cd20f0492391d63c245295468a2123127bacfe216b2344980f5afb5d3ca3) |
+| `spec` | required | [`SessionSandboxSpec`](#persistence-type-sha256-ed6437b4965ab88d28404732dfc112027c53f5c8346b9fbfd48e0378dd1e6990) |
+
 <a id="persistence-type-sha256-54f9276a1617d7c12594722c89cfe864bcbe4517e9a6f9c98bab14f199a135e0"></a>
 
 ### `{ step, stream, turn }`
@@ -8161,6 +8245,22 @@ SHA-256: `516da4cdd6d2f1e5ce488e648578ca51f40e458f707b803e5b24de870e799415`
 | `seq` | required | `number` |
 | `time` | required | `number` |
 | `type` | required | `"sandbox/mode"` |
+
+<a id="persistence-type-sha256-a7d338468645cbd36e79891d389bac3095e9914d2db4e1d54eee0a3c43ce192b"></a>
+
+<a id="persistence-type-eventsandboxspec"></a>
+
+### `{ type: "sandbox/spec" }`
+
+SHA-256: `a7d338468645cbd36e79891d389bac3095e9914d2db4e1d54eee0a3c43ce192b`
+
+| Property | Presence | Type |
+|---|---|---|
+| `data` | required | [`{ source, spec }`](#persistence-type-sha256-7769d8608474910c06069132f580bf616d81dcaa70fc36cd8da670713c8931ce) |
+| `ignorable` | optional | `true` |
+| `seq` | required | `number` |
+| `time` | required | `number` |
+| `type` | required | `"sandbox/spec"` |
 
 <a id="persistence-type-sha256-2a7f86849ae54b3398ee49661a757c4fcb59a6192b7036ee2ff514617e13fb42"></a>
 

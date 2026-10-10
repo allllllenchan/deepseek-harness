@@ -11185,6 +11185,116 @@
       }
     },
     {
+      "key": "event:sandbox/spec",
+      "kind": "event",
+      "event": "sandbox/spec",
+      "surface": false,
+      "digest": "a7d338468645cbd36e79891d389bac3095e9914d2db4e1d54eee0a3c43ce192b",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 8,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 9,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 9,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 10,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "source",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "spec",
+                "type": 5,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              3,
+              4
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "spawn"
+          },
+          {
+            "kind": "literal",
+            "value": "user"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "tempRoot",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "writableRoots",
+                "type": 7,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "array",
+            "element": 6
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "literal",
+            "value": "sandbox/spec"
+          }
+        ]
+      }
+    },
+    {
       "key": "event:schedule/change",
       "kind": "event",
       "event": "schedule/change",
@@ -32197,6 +32307,20 @@
           {
             "kind": "literal",
             "value": "dsh-session-title-llm"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
+      "digest": "2273253414cfd3177e548c6f1bf2ebe23f39bb9aee61e23a431b2f5a5e3f450b",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "literal",
+            "value": "spawn"
           }
         ]
       },
@@ -59711,6 +59835,73 @@
       "sources": []
     },
     {
+      "digest": "7769d8608474910c06069132f580bf616d81dcaa70fc36cd8da670713c8931ce",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "source",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "spec",
+                "type": 4,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              2,
+              3
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "spawn"
+          },
+          {
+            "kind": "literal",
+            "value": "user"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "tempRoot",
+                "type": 5,
+                "optional": true
+              },
+              {
+                "name": "writableRoots",
+                "type": 6,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "array",
+            "element": 5
+          }
+        ]
+      },
+      "names": [],
+      "sources": [
+        "packages/sandbox/sandbox-policy/src/session-spec.ts:52"
+      ]
+    },
+    {
       "digest": "78a9be340090b735a39980e7222ce730c972fbcf1de7c9e0aef2125884b7caee",
       "schema": {
         "root": 0,
@@ -59875,6 +60066,20 @@
           {
             "kind": "literal",
             "value": "session/title"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
+      "digest": "7acfccf002b9bdea59a68cc06146c7a2079435cfde2e948f2d6fc2d57bd520fc",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "literal",
+            "value": "sandbox/spec"
           }
         ]
       },
@@ -68534,6 +68739,35 @@
       "sources": []
     },
     {
+      "digest": "a0c6cd20f0492391d63c245295468a2123127bacfe216b2344980f5afb5d3ca3",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "union",
+            "types": [
+              1,
+              2
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "spawn"
+          },
+          {
+            "kind": "literal",
+            "value": "user"
+          }
+        ]
+      },
+      "names": [
+        "packages/sandbox/sandbox-policy/src/session-spec.ts#SessionSpecSource"
+      ],
+      "sources": [
+        "packages/sandbox/sandbox-policy/src/session-spec.ts:61"
+      ]
+    },
+    {
       "digest": "a0f25b5aeeebf2bf1542ce67726b095e3b139a39c71861d57e827f12dea1f499",
       "schema": {
         "root": 0,
@@ -69411,6 +69645,114 @@
           {
             "kind": "literal",
             "value": "plan/mode"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
+      "digest": "a7d338468645cbd36e79891d389bac3095e9914d2db4e1d54eee0a3c43ce192b",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 8,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 9,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 9,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 10,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "source",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "spec",
+                "type": 5,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              3,
+              4
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "spawn"
+          },
+          {
+            "kind": "literal",
+            "value": "user"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "tempRoot",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "writableRoots",
+                "type": 7,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "array",
+            "element": 6
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "literal",
+            "value": "sandbox/spec"
           }
         ]
       },
@@ -83754,6 +84096,44 @@
       "names": [],
       "sources": [
         "packages/core/session/src/types.ts:228"
+      ]
+    },
+    {
+      "digest": "ed6437b4965ab88d28404732dfc112027c53f5c8346b9fbfd48e0378dd1e6990",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "tempRoot",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "writableRoots",
+                "type": 2,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "array",
+            "element": 1
+          }
+        ]
+      },
+      "names": [
+        "packages/sandbox/sandbox-policy/src/session-spec.ts#SessionSandboxSpec"
+      ],
+      "sources": [
+        "packages/sandbox/sandbox-policy/src/session-spec.ts:68"
       ]
     },
     {

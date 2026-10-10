@@ -10,7 +10,7 @@ import { join, resolve, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
+import { KNOWN_SESSION_EVENT_TYPES, SESSION_FORMAT_VERSION, Session, SessionId } from '@deepseek-ai/dsh-session'
 import SandboxPolicyService, { SANDBOX_MODES, setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt, { renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
@@ -49,6 +49,15 @@ async function policyContext(ctx: Context, activeSession: Session): Promise<stri
 }
 
 describe('SandboxPolicyService', () => {
+  it('keeps sandbox/spec in the persisted event vocabulary (do not let the log become unreadable)', () => {
+    // `KNOWN_SESSION_EVENT_TYPES` is GENERATED from every in-repo SessionEventMap
+    // member (`pnpm run gen-persistence-catalog`). Declaring the event without
+    // regenerating leaves the COLD read path refusing the whole log — hot reads
+    // (in-memory) hide it until the next restart, and then the GUI cannot open
+    // any session that ever used /sandbox. 2026-10-10 incident.
+    expect(KNOWN_SESSION_EVENT_TYPES.has('sandbox/spec')).toBe(true)
+  })
+
   it('defaults to read-only under the process cwd', async () => {
     const ctx = await mounted()
     expect(ctx.sandboxPolicy.defaultMode).toBe('read-only')
