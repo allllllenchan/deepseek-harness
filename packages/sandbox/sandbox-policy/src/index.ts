@@ -108,34 +108,25 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /**
- * Plugin config: the deployment's sandbox default. All optional — `Config`
- * supplies the defaults (`mode: 'read-only'` is the fail-safe default; a
- * deployment that wants a workspace-writable agent opts in explicitly). The
- * runner choice is NOT here (it is the `ctx.sandbox` provider's config), nor
- * is any per-family knob: this is the one shared policy home.
- */
-/** One workspace entry's accepted shape; fields stay optional so absence means "fall through". */
-const workspaceSandboxEntrySchema = zod.object({
-  extraWritableRoots: zod.array(zod.string()).optional(),
-  tempRoot: zod.string().optional(),
-})
-
-/** The whole `workspaceSandbox` mapping. */
-const workspaceSandboxSchema = zod.record(zod.string(), workspaceSandboxEntrySchema)
-
-/**
  * Sandbox defaults bound to ONE workspace path — the workspace level of the
  * single SandboxSpec model (session-level overrides are a later binding of the
  * same fields). Every field is optional: an omitted field falls through to the
  * deployment-level value, then the built-in default.
  */
 export interface WorkspaceSandboxDefaults {
-  /** Writable roots for sessions in this workspace (replaces the deployment-level extras when present). */
+  /** Writable roots for sessions in this workspace (replaces the deployment-level extras when non-empty). */
   extraWritableRoots?: string[]
   /** Private-temp parent for sessions in this workspace (overrides the deployment-level value). */
   tempRoot?: string
 }
 
+/**
+ * Plugin config: the deployment's sandbox default. All optional — `Config`
+ * supplies the defaults (`mode: 'read-only'` is the fail-safe default; a
+ * deployment that wants a workspace-writable agent opts in explicitly). The
+ * runner choice is NOT here (it is the `ctx.sandbox` provider's config), nor
+ * is any per-family knob: this is the one shared policy home.
+ */
 export interface Config {
   /** File-sandbox mode a session starts from (default: `read-only`). */
   mode?: SandboxMode
@@ -205,11 +196,15 @@ export class SandboxPolicyService extends Service {
     workspaceRoot: z.string(),
     extraWritableRoots: z.array(z.string()),
     tempRoot: z.string(),
-    // Untyped on purpose: schemastery materializes an absent array as `[]`,
-    // which would erase "this entry does not configure extras" and silently
-    // drop the deployment value. The constructor validates and normalizes it
-    // through the zod schema below, which preserves absence.
-    workspaceSandbox: z.any(),
+    // Typed (never `any`) so the config catalog and the settings-form path see
+    // an ordinary schema. NOTE: schemastery materializes an absent array as
+    // `[]`, so an entry that does not mention extraWritableRoots arrives as
+    // `[]`; `workspaceSandboxOf` therefore treats an EMPTY entry list as "not
+    // configured" and falls through to the deployment value.
+    workspaceSandbox: z.dict(z.object({
+      extraWritableRoots: z.array(z.string()),
+      tempRoot: z.string(),
+    })),
   })
 
   static inject = ['sessionProjections']
@@ -233,21 +228,18 @@ export class SandboxPolicyService extends Service {
     this.workspaceRoot = resolveWorkspaceRoot(config.workspaceRoot ?? process.cwd())
     this.extraWritableRoots = (config.extraWritableRoots ?? []).map(resolveWorkspaceRoot)
     this.tempRoot = config.tempRoot === undefined ? undefined : resolveWorkspaceRoot(config.tempRoot)
-    const parsedWorkspaceSandbox = config.workspaceSandbox === undefined
-      ? {}
-      : (() => {
-        const result = workspaceSandboxSchema.safeParse(config.workspaceSandbox)
-        if (!result.success) {
-          throw new Error(`sandbox-policy: workspaceSandbox must map workspace paths to { extraWritableRoots?, tempRoot? }: ${result.error.message}`)
-        }
-        return result.data
-      })()
+    const parsedWorkspaceSandbox = config.workspaceSandbox ?? {}
     this.workspaceSandbox = Object.fromEntries(
       Object.entries(parsedWorkspaceSandbox).map(([path, defaults]) => [resolveWorkspaceRoot(path), {
-        ...defaults.extraWritableRoots === undefined
+        // An entry that does not mention roots arrives as `[]` (schemastery
+        // materializes the array), and an empty list means "not configured"
+        // for this additive field — it must NOT swallow the deployment value.
+        ...(defaults.extraWritableRoots ?? []).length === 0
           ? {}
-          : { extraWritableRoots: defaults.extraWritableRoots.map(resolveWorkspaceRoot) },
-        ...defaults.tempRoot === undefined ? {} : { tempRoot: resolveWorkspaceRoot(defaults.tempRoot) },
+          : { extraWritableRoots: (defaults.extraWritableRoots ?? []).map(resolveWorkspaceRoot) },
+        ...defaults.tempRoot === undefined || defaults.tempRoot === ''
+          ? {}
+          : { tempRoot: resolveWorkspaceRoot(defaults.tempRoot) },
       }]),
     )
 
