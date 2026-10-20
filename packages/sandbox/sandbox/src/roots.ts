@@ -43,13 +43,21 @@ export function canonicalPath(path: string): string {
 /**
  * The roots one confined execution may WRITE under — the mode's meaning as a
  * canonical, deduplicated allow-list. `read-only` allows nothing;
- * `workspace-write` allows the policy's workspace root, the host `/tmp`, and
- * the per-user platform temp dir (`os.tmpdir()` — the real temp area for
- * mkstemp-family tools; omitting it would deny what the mode promises).
+ * `workspace-write` allows the policy's workspace root, every declared extra
+ * writable root, the host `/tmp`, and the per-user platform temp dir
+ * (`os.tmpdir()` — the real temp area for mkstemp-family tools; omitting it
+ * would deny what the mode promises).
+ *
+ * `extraWritableRoots` MUST be included here: the policy resolver and the
+ * pwsh/bash ACL runner both honour declared extras, so omitting them here made
+ * the fs tools the only layer that denied writes the mode had granted
+ * (session-b0ccf1cf: `/sandbox root <dir>` succeeded and the disclosure listed
+ * three roots, yet write/edit under the extra root failed with
+ * `[sandbox: file access denied under workspace-write mode]`).
  * @param policy - the file-effect policy to derive the allow-list from.
  * @returns the canonical writable roots; empty exactly under `read-only`.
  */
 export function writableRoots(policy: SandboxExecutionPolicy): string[] {
   if (policy.mode !== 'workspace-write') return []
-  return [...new Set([policy.workspaceRoot, '/tmp', tmpdir()].map(canonicalPath))]
+  return [...new Set([policy.workspaceRoot, ...(policy.extraWritableRoots ?? []), '/tmp', tmpdir()].map(canonicalPath))]
 }

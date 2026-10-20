@@ -43,4 +43,23 @@ describe('writableRoots', () => {
     // Deduplicated after canonicalization (/tmp and os.tmpdir() may coincide).
     expect(new Set(writable).size).toBe(writable.length)
   })
+
+  it('workspace-write grants declared extra roots too (the fs layer must match the ACL runner)', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'dsh-ws-'))
+    const extra = mkdtempSync(join(tmpdir(), 'dsh-extra-'))
+    roots.push(ws, extra)
+    const writable = writableRoots({ mode: 'workspace-write', workspaceRoot: ws, extraWritableRoots: [extra] })
+    expect(writable).toContain(realpathSync.native(ws))
+    // Regression: omitting extras here denied every fs-tool write under a root
+    // the policy resolver and the pwsh/bash ACL runner had already granted
+    // (session-b0ccf1cf: `/sandbox root <dir>` succeeded, write/edit still failed).
+    expect(writable).toContain(realpathSync.native(extra))
+    expect(new Set(writable).size).toBe(writable.length)
+  })
+
+  it('read-only still grants nothing even when extra roots are declared', () => {
+    const extra = mkdtempSync(join(tmpdir(), 'dsh-extra-'))
+    roots.push(extra)
+    expect(writableRoots({ mode: 'read-only', workspaceRoot: process.cwd(), extraWritableRoots: [extra] })).toEqual([])
+  })
 })
