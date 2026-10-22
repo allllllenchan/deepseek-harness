@@ -12,7 +12,7 @@ Chat Completions retains tool arguments as strings, including malformed JSON fro
 
 The [Messages serializer](../../../../packages/llm/llm-deepseek/src/serialize.ts) follows the [pi-ai history conversion](../../../../packages/llm/llm-pi-ai/src/replay.ts): malformed JSON and non-object values become `{}` only in the outgoing historical tool input. Call ids, names, results, and original Session records remain intact. This applies with valid, absent, or unusable native replay metadata and does not execute the historical call again.
 
-This supersedes the historical argument rejection in the [Messages adapter decision](../feature/2026-09-07-deepseek-messages-adapter.md). New Messages responses still require valid object arguments before successful completion; output-limit truncation retains its existing pruning behavior. No Session event, persistence type, or protocol configuration changes.
+This supersedes the historical argument rejection in the [Messages adapter decision](../feature/2026-09-07-deepseek-messages-adapter.md). Output-limit truncation retains its existing pruning behavior. The [live-response counterpart](2026-10-22-tolerate-malformed-live-tool-arguments.md) later removed the parse-before-completion rule for newly generated arguments, so both sides of the exchange tolerate unusable arguments. No Session event, persistence type, or protocol configuration changes.
 
 ## Alternatives considered
 

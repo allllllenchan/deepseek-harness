@@ -147,15 +147,8 @@ export async function* translate(events: AsyncIterable<Record<string, unknown>>,
     } else {
       if (reason === undefined || [...blocks.values()].some(block => !block.closed)) return malformed('message_stop without settled blocks and stop reason')
       if (blocks.size === 0 && reason.kind === 'stop') throw new LlmError('DeepSeek Messages returned no content', 'EMPTY_RESPONSE')
-      // Truncated tool JSON is retained in the stream, then pruned by the shared assembler.
-      if (reason.kind !== 'max-tokens') {
-        for (const { content } of blocks.values()) {
-          if (content.type !== 'tool-call') continue
-          let parsed: unknown
-          try { parsed = JSON.parse(content.arguments) } catch (_invalidProviderToolJson) { return malformed('tool input is invalid JSON') }
-          object(parsed)
-        }
-      }
+      // Tool arguments stream through verbatim: the tool's schema check owns their
+      // validity, so one unusable call becomes an INVALID_ARGS result, not a failed turn.
       usage.totalTokens = usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
       yield { type: 'usage', usage }
       yield { type: 'finish', reason, replayState: replayState(model, [...blocks.values()].map(block => block.replay)) }
